@@ -1,0 +1,66 @@
+# Render blueprint for HATUA.
+#
+# Free tier, single service. Deploy by pointing Render at this repo — it reads
+# this file and provisions everything except the secrets, which you set in the
+# dashboard.
+#
+# Note on the free tier: instances sleep after 15 minutes of inactivity and
+# cold-start on the next request. That is why the service loads a JSON snapshot
+# on boot and refreshes in the background rather than blocking startup on the
+# pipeline. A warning system that is unavailable while it thinks is not much of
+# a warning system.
+
+services:
+  - type: web
+    name: hatua
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    region: frankfurt          # closest Render region to the Horn of Africa
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      # --- Reasoning core ---
+      - key: LLM_PROVIDER
+        value: gemini
+      - key: GEMINI_API_KEY
+        sync: false            # set in the Render dashboard, never in git
+
+      # --- Humanitarian data (not a secret; self-generated base64) ---
+      - key: HDX_HAPI_APP_IDENTIFIER
+        sync: false
+
+      # --- Delivery ---
+      - key: SMS_PROVIDER
+        value: zettatel
+      - key: ZETTATEL_USERNAME
+        sync: false
+      - key: ZETTATEL_PASSWORD
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: AT_USERNAME
+        value: sandbox
+      - key: AT_API_KEY
+        sync: false
+      - key: AT_USSD_SERVICE_CODE
+        value: "*384*7899#"
+
+      # --- Safety ---
+      # Ships true. Nothing reaches a real handset until this is deliberately
+      # flipped in the dashboard. An early warning system that can message
+      # people by accident is a liability, not a feature.
+      - key: DRY_RUN
+        value: "true"
+
+      # Salt for hashing phone numbers. We never store a raw MSISDN — in a
+      # region with active conflict, a phone number in an early warning
+      # database is a person's location history.
+      - key: CONTACT_SALT
+        generateValue: true
+
+      - key: PUBLIC_BASE_URL
+        value: https://hatua.onrender.com
+
+      - key: PYTHON_VERSION
+        value: "3.11"
