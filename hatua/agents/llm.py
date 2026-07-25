@@ -40,6 +40,12 @@ from ..config import get_settings
 
 log = logging.getLogger("hatua.llm")
 
+# Defence in depth. Keys now travel in headers rather than query strings, but
+# httpx logs every request URL at INFO and a future provider may require a
+# query parameter. Silencing this removes a whole class of credential leak into
+# application and deployment logs.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 T = TypeVar("T", bound=BaseModel)
 
 
@@ -230,10 +236,13 @@ class LLM:
     ) -> tuple[str, dict[str, str], dict[str, Any]]:
         model = model or self.model
         if self.spec.style == "gemini":
-            url = (
-                f"{self.spec.base_url}/models/{model}:generateContent"
-                f"?key={self.api_key}"
-            )
+            # The key goes in a HEADER, never the query string. Google's docs
+            # show ?key=... and it works — but httpx, uvicorn and most proxies
+            # log full request URLs at INFO, so a query-string key ends up in
+            # plaintext in application logs, deployment logs and any error
+            # tracker. Observed happening during development on 25 Jul 2026.
+            # x-goog-api-key is the documented header form and is not logged.
+            url = f"{self.spec.base_url}/models/{model}:generateContent"
             body = {
                 "systemInstruction": {"parts": [{"text": system}]},
                 "contents": [{"role": "user", "parts": [{"text": user}]}],
@@ -257,7 +266,14 @@ class LLM:
                     "thinkingConfig": {"thinkingLevel": "low"},
                 },
             }
-            return url, {"Content-Type": "application/json"}, body
+            return (
+                url,
+                {
+                    "Content-Type": "application/json",
+                    "x-goog-api-key": self.api_key,
+                },
+                body,
+            )
 
         if self.spec.style == "anthropic":
             return (
