@@ -26,6 +26,7 @@ Free tiers at time of writing (verify before relying on them):
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -57,15 +58,34 @@ class ProviderSpec:
     default_model: str
     env_key: str
     style: str  # "openai" | "gemini" | "anthropic"
+    # Models to fall back to when the primary returns 429 or 503. Free tiers
+    # meter *per model*, so an exhausted quota on one model says nothing about
+    # the next: observed on 25 Jul 2026, gemini-flash-latest, gemini-2.0-flash
+    # and gemini-2.0-flash-lite were all quota-exhausted while
+    # gemini-flash-lite-latest answered normally on the same key, same second.
+    # An early warning service must degrade to a smaller model rather than go
+    # silent.
+    fallbacks: tuple[str, ...] = ()
 
 
 PROVIDERS: dict[str, ProviderSpec] = {
     "gemini": ProviderSpec(
         name="gemini",
         base_url="https://generativelanguage.googleapis.com/v1beta",
-        default_model="gemini-2.5-flash",
+        # Use the rolling alias rather than a pinned version. Pinned Gemini
+        # model IDs get retired for new API keys without warning — a fresh key
+        # issued today is refused by gemini-2.5-flash with
+        # "no longer available to new users", even though that model still
+        # appears in the /models listing. The alias survives that.
+        default_model="gemini-flash-latest",
         env_key="GEMINI_API_KEY",
         style="gemini",
+        fallbacks=(
+            "gemini-flash-lite-latest",
+            "gemini-3.1-flash-lite",
+            "gemini-2.0-flash-lite",
+            "gemini-2.0-flash",
+        ),
     ),
     "groq": ProviderSpec(
         name="groq",
@@ -96,6 +116,29 @@ PROVIDERS: dict[str, ProviderSpec] = {
         style="anthropic",
     ),
 }
+
+
+def _retry_delay_seconds(response: httpx.Response) -> float | None:
+    """Extract the provider's own advice on how long to wait after a 429.
+
+    Google returns it inside error.details as a RetryInfo entry; most other
+    providers use the standard Retry-After header.
+    """
+    header = response.headers.get("retry-after")
+    if header:
+        try:
+            return float(header)
+        except ValueError:
+            pass
+    try:
+        details = response.json().get("error", {}).get("details", [])
+        for entry in details:
+            delay = entry.get("retryDelay")
+            if isinstance(delay, str) and delay.endswith("s"):
+                return float(delay[:-1])
+    except (json.JSONDecodeError, ValueError, AttributeError, TypeError):
+        pass
+    return None
 
 
 def _extract_json(text: str) -> Any:
@@ -177,11 +220,18 @@ class LLM:
     # -- request building ---------------------------------------------------
 
     def _build(
-        self, system: str, user: str, schema: dict[str, Any], max_tokens: int
+        self,
+        system: str,
+        user: str,
+        schema: dict[str, Any],
+        max_tokens: int,
+        *,
+        model: str | None = None,
     ) -> tuple[str, dict[str, str], dict[str, Any]]:
+        model = model or self.model
         if self.spec.style == "gemini":
             url = (
-                f"{self.spec.base_url}/models/{self.model}:generateContent"
+                f"{self.spec.base_url}/models/{model}:generateContent"
                 f"?key={self.api_key}"
             )
             body = {
@@ -192,6 +242,19 @@ class LLM:
                     "maxOutputTokens": max_tokens,
                     "responseMimeType": "application/json",
                     "responseSchema": _to_gemini_schema(schema),
+                    # Gemini 2.5+ spends output tokens on internal reasoning
+                    # before emitting a single character of the answer. With
+                    # thinking on and a 2000-token budget, every response came
+                    # back as valid JSON truncated mid-string — which surfaces
+                    # as a confusing parse error rather than "you ran out of
+                    # room". These tasks are constrained extraction against a
+                    # schema, not open-ended reasoning, so thinking buys us
+                    # nothing and costs the entire budget.
+                    #
+                    # Note: thinkingBudget=0 is REJECTED with HTTP 400 on
+                    # gemini-flash-latest. thinkingLevel="low" is accepted and
+                    # measurably yields thoughtsTokenCount=0.
+                    "thinkingConfig": {"thinkingLevel": "low"},
                 },
             }
             return url, {"Content-Type": "application/json"}, body
@@ -205,7 +268,7 @@ class LLM:
                     "Content-Type": "application/json",
                 },
                 {
-                    "model": self.model,
+                    "model": model,
                     "max_tokens": max_tokens,
                     "temperature": 0.2,
                     "system": system,
@@ -221,7 +284,7 @@ class LLM:
                 "Content-Type": "application/json",
             },
             {
-                "model": self.model,
+                "model": model,
                 "temperature": 0.2,
                 "max_tokens": max_tokens,
                 "response_format": {"type": "json_object"},
@@ -237,6 +300,20 @@ class LLM:
             cands = payload.get("candidates") or []
             if not cands:
                 raise LLMError(f"gemini returned no candidates: {payload}")
+            # Say plainly when the response was cut off. A truncation reported
+            # as "no parseable JSON" sends you hunting for a parser bug that
+            # does not exist.
+            reason = cands[0].get("finishReason")
+            if reason == "MAX_TOKENS":
+                usage = payload.get("usageMetadata", {})
+                raise LLMError(
+                    f"response truncated at max_tokens "
+                    f"(used {usage.get('candidatesTokenCount', '?')} output, "
+                    f"{usage.get('thoughtsTokenCount', 0)} on thinking). "
+                    f"Raise max_tokens or shorten the schema."
+                )
+            if reason == "SAFETY":
+                raise LLMError("response blocked by provider safety filter")
             parts = (cands[0].get("content") or {}).get("parts") or []
             return "".join(p.get("text", "") for p in parts)
         if self.spec.style == "anthropic":
@@ -258,7 +335,7 @@ class LLM:
         user: str,
         response_model: type[T],
         max_tokens: int = 2048,
-        retries: int = 2,
+        retries: int = 5,
     ) -> T:
         """Call the model and return a validated instance of ``response_model``.
 
@@ -270,10 +347,16 @@ class LLM:
         prompt = user
         last: str = ""
 
+        # Try the configured model first, then each fallback. Quota is metered
+        # per model, so exhaustion on one says nothing about the next.
+        model_chain = [self.model, *(m for m in self.spec.fallbacks if m != self.model)]
+        model_index = 0
+
         async with httpx.AsyncClient(timeout=90.0) as client:
             for attempt in range(retries + 1):
                 url, headers, body = self._build(
-                    system, prompt, schema, max_tokens
+                    system, prompt, schema, max_tokens,
+                    model=model_chain[model_index],
                 )
                 try:
                     r = await client.post(url, headers=headers, json=body)
@@ -285,8 +368,24 @@ class LLM:
                 if r.status_code >= 400:
                     last = f"HTTP {r.status_code}: {r.text[:300]}"
                     log.warning("%s attempt %d: %s", self.spec.name, attempt, last)
-                    # Rate limits and server errors are worth retrying.
-                    if r.status_code in (429, 500, 502, 503, 529):
+                    if r.status_code in (429, 503):
+                        # Move down the model chain before waiting. A smaller
+                        # model answering now beats the right model answering
+                        # after the flood.
+                        if model_index + 1 < len(model_chain):
+                            model_index += 1
+                            log.warning(
+                                "%s: %s exhausted, falling back to %s",
+                                self.spec.name,
+                                model_chain[model_index - 1],
+                                model_chain[model_index],
+                            )
+                            continue
+                        delay = _retry_delay_seconds(r) or 20.0
+                        log.info("all models rate limited, sleeping %.0fs", delay)
+                        await asyncio.sleep(delay)
+                        continue
+                    if r.status_code in (500, 502, 529):
                         continue
                     raise LLMError(last)
 
@@ -309,7 +408,8 @@ class LLM:
                     )
 
         raise LLMError(
-            f"{self.spec.name}/{self.model} failed after {retries + 1} attempts. "
+            f"{self.spec.name} failed after {retries + 1} attempts across "
+            f"models {model_chain}. "
             f"Last error: {last}"
         )
 

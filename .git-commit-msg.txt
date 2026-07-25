@@ -1,0 +1,28 @@
+Add reasoning core: Analyst, Planner, Localizer and blocking Verifier
+
+End-to-end pipeline now runs on live data: ICPAC/Open-Meteo/GDACS -> fusion ->
+trigger -> impact hypothesis -> action plan -> localised message -> verification.
+
+The Verifier is the point of the whole design. Six checks, five deterministic
+and run first, because a check that depends on a model cannot be trusted to
+police a model. The LLM adjudicates only semantic faithfulness, and its vote
+can block but never rescue. Fails closed: if verification errors, nothing sends.
+
+It works. On the first live run it caught Gemini inventing 'Avoid conflict
+areas and protect your livestock' - livelihood instructions appearing in no
+approved action - and blocked the advisory.
+
+- Anticipatory action library: the model selects action_ids, never authors
+  advice. Below HIGH confidence only no-regret actions are even shown to it,
+  so a 45%-confidence drought signal cannot tell a family to sell breeding
+  stock.
+- Severity ceiling enforced in code, not just prompted.
+- Numeric fidelity handles Arabic-Indic and Ethiopic numerals; a [0-9] scan
+  would let an Arabic advisory carry unverified figures straight through.
+
+Provider hardening found the hard way:
+- gemini-2.5-flash is refused for newly issued keys; use the rolling alias
+- thinkingBudget=0 returns HTTP 400; thinkingLevel='low' works and zeroes it
+- thinking tokens silently ate the output budget, truncating valid JSON
+  mid-string and surfacing as a bogus parse error
+- free-tier quota is metered PER MODEL, so added an automatic fallback chain
