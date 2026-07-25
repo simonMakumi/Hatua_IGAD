@@ -43,11 +43,19 @@ class Settings(BaseSettings):
     # costs KES 0.30 at volume; HostPinnacle is KES 0.20. Africa's Talking is
     # KES 0.80 and its sandbox never reaches a real handset, so it is retained
     # only for USSD, where it has no free competitor in Kenya.
-    sms_provider: str = "mobitech"
+    sms_provider: str = "zettatel"
+    # Zettatel authenticates with the portal login itself — there is no
+    # separate API key to find, which is confusing because their docs also
+    # document an apikey endpoint. That endpoint mints an *alternative*
+    # credential; userid+password works directly against /SMSApi/send.
+    zettatel_username: str = ""
+    zettatel_password: str = ""
+    zettatel_sender_id: str = ""
+    zettatel_api_key: str = ""  # optional alternative to password auth
+
     mobitech_api_key: str = ""
     hostpinnacle_api_key: str = ""
     hostpinnacle_user_id: str = ""
-    zettatel_api_key: str = ""
     sms_sender_id: str = ""
 
     at_username: str = "sandbox"
