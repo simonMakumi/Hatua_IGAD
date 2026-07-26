@@ -28,6 +28,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse
 
 from ..agents.llm import available_providers
 from ..config import get_settings
+from ..delivery import voice
 from ..delivery.ussd import USSDMenu, USSDRequest
 from ..fusion.engine import explain
 from ..models import (
@@ -58,6 +59,7 @@ class State:
         self.results: list[DistrictResult] = []
         self.advisories: dict[tuple[str, str], Advisory] = {}
         self.feedback: list[CommunityFeedback] = []
+        self.audio: dict[str, str] = {}
         self.last_run: datetime | None = None
         self.running: bool = False
         self.last_error: str | None = None
@@ -198,6 +200,10 @@ async def refresh(top_n: int = 4) -> None:
             concurrency=1,
         )
         STATE.index(results)
+        # Pre-render audio on the schedule, never on the call path.
+        STATE.audio = await voice.render_all(
+            [a for a in STATE.all_advisories if a.dispatchable]
+        )
         STATE.save(SNAPSHOT)
         log.info(
             "refresh complete: %d districts, %d advisories (%d blocked)",
@@ -256,6 +262,7 @@ async def health() -> dict[str, Any]:
         "advisories_blocked": len(STATE.blocked),
         "ussd_cache_entries": len(STATE.advisories),
         "feedback_received": len(STATE.feedback),
+        "audio_rendered": len(STATE.audio),
         "llm_providers_configured": {
             k: v for k, v in available_providers().items() if v
         },
@@ -468,6 +475,78 @@ async def ussd_simulate(text: str = "") -> str:
 # ---------------------------------------------------------------------------
 # Dashboard
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Voice / IVR
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/voice/coverage")
+async def voice_coverage() -> dict[str, Any]:
+    """Which languages have audio and by what means.
+
+    Exposed so the gap is visible rather than implied: Afaan Oromo and Tigrinya
+    have no commercial TTS voice anywhere, and pretending otherwise would be
+    the same failure as fabricating data coverage.
+    """
+    return {
+        "voices": voice.coverage(),
+        "rendered": len(STATE.audio),
+        "azure_configured": bool(get_settings().azure_speech_key),
+    }
+
+
+@app.get("/audio/{filename}")
+async def audio(filename: str) -> Response:
+    """Serve pre-rendered advisory audio to the telephony provider."""
+    # Reject traversal outright rather than sanitising — this path is handed
+    # to an external provider and there is no legitimate case for a subpath.
+    if "/" in filename or "\\" in filename or ".." in filename:
+        raise HTTPException(400, "invalid filename")
+    path = voice.AUDIO_DIR / filename
+    if not path.exists():
+        raise HTTPException(404, "audio not found")
+    return Response(content=path.read_bytes(), media_type="audio/wav")
+
+
+@app.post("/voice", response_class=PlainTextResponse)
+async def voice_callback(
+    isActive: str = Form(default="1"),
+    callerNumber: str = Form(default=""),
+    destinationNumber: str = Form(default=""),
+    sessionId: str = Form(default=""),
+) -> str:
+    """Africa's Talking inbound voice callback.
+
+    Serves pre-rendered audio. Nothing is synthesised here — a caller will not
+    wait for TTS and the provider times out first.
+    """
+    ranked = sorted(
+        STATE.results, key=lambda r: -r.assessment.compound_risk_score
+    )
+    if not ranked:
+        return voice.ivr_xml(None)
+
+    top = ranked[0]
+    advisory = next(
+        (
+            a
+            for a in top.advisories
+            if a.dispatchable and a.advisory_id in STATE.audio
+        ),
+        None,
+    )
+    if advisory is None:
+        fallback = next(
+            (a for a in top.advisories if a.dispatchable), None
+        )
+        return voice.ivr_xml(
+            None, fallback_text=fallback.body if fallback else ""
+        )
+
+    base = get_settings().public_base_url.rstrip("/")
+    return voice.ivr_xml(f"{base}/audio/{STATE.audio[advisory.advisory_id]}")
 
 
 @app.get("/", response_class=HTMLResponse)
