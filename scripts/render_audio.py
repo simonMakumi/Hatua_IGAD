@@ -42,15 +42,19 @@ DATA = pathlib.Path(__file__).resolve().parent.parent / "data"
 AUDIO = DATA / "audio"
 SNAPSHOT = DATA / "snapshot.json"
 
-# MMS uses ISO 639-3 codes, which do NOT match the two-letter codes used
-# everywhere else in this project. Note `gaz` for Afaan Oromo specifically — a
-# naive lookup of `orm` or `om` silently fails, and this trips people up.
+# MMS uses ISO 639-3 codes, which do not match the two-letter codes used
+# everywhere else in this project.
+#
+# All of these were verified against the Hub, because guessing is how you waste
+# a download: `facebook/mms-tts-gaz`, `-gax`, `-hae` and `-orc` do NOT exist
+# despite gaz (West Central Oromo) being the more precise ISO code. Meta
+# published Oromo under the macrolanguage code `orm`.
 MMS_LANG: dict[str, str] = {
     "en": "eng",
     "sw": "swh",   # Swahili (individual language), not the macrolanguage `swa`
     "so": "som",
     "am": "amh",
-    "om": "gaz",   # West Central Oromo — NOT `orm`
+    "om": "orm",   # verified on the Hub; mms-tts-gaz does not exist
     "ti": "tir",
     "ar": "ara",
 }

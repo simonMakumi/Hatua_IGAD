@@ -68,19 +68,20 @@ AZURE_VOICES: dict[Language, str] = {
 
 # No *commercial* cloud TTS covers these — not Azure, Google, Amazon, OpenAI or
 # ElevenLabs. Meta's open-weights MMS-TTS does, via scripts/render_audio.py,
-# which is why that is the primary path rather than a fallback. `gaz` is the
-# MMS code for Afaan Oromo; a naive lookup of `orm` silently fails.
+# which is why that is the primary path rather than a fallback.
 NO_COMMERCIAL_VOICE: frozenset[Language] = frozenset(
     {Language.OROMO, Language.TIGRINYA}
 )
 
-# MMS-TTS (ISO 639-3) covers every language we issue advisories in.
+# MMS-TTS (ISO 639-3) covers every language we issue advisories in. Each code
+# verified against the Hub — mms-tts-gaz/-gax/-hae/-orc do not exist, Oromo is
+# published under the macrolanguage code.
 MMS_LANG: dict[Language, str] = {
     Language.ENGLISH: "eng",
     Language.SWAHILI: "swh",
     Language.SOMALI: "som",
     Language.AMHARIC: "amh",
-    Language.OROMO: "gaz",
+    Language.OROMO: "orm",
     Language.TIGRINYA: "tir",
     Language.ARABIC: "ara",
 }
