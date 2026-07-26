@@ -66,9 +66,32 @@ def main() -> int:
             "Missing dependencies. Install with:\n"
             "  pip install torch --index-url "
             "https://download.pytorch.org/whl/cpu\n"
-            "  pip install transformers scipy"
+            "  pip install transformers scipy uroman"
         )
         return 1
+
+    # MMS is trained on romanised text. For Ge'ez, Arabic and any other
+    # non-Latin script the tokenizer needs uroman, and WITHOUT IT THE AUDIO IS
+    # SILENTLY WRONG — transformers emits a warning and carries on producing a
+    # WAV that does not say what you asked for. That is far worse than an
+    # error, so we refuse to render non-Latin languages unless uroman is
+    # importable.
+    try:
+        import uroman  # noqa: F401
+
+        has_uroman = True
+    except ImportError:
+        has_uroman = False
+        print(
+            "WARNING: uroman is not installed.\n"
+            "  Amharic, Tigrinya and Arabic use non-Latin scripts and MMS "
+            "needs uroman to pronounce them.\n"
+            "  Without it the model produces audio that does NOT say what the "
+            "advisory says.\n"
+            "  Install with:  pip install uroman\n"
+            "  Skipping those languages for now; Latin-script languages "
+            "(en, sw, so, om) are unaffected.\n"
+        )
 
     if not SNAPSHOT.exists():
         print(f"No snapshot at {SNAPSHOT}. Run scripts/build_snapshot.py first.")
@@ -111,6 +134,10 @@ def main() -> int:
             print(f"[skip] no MMS model for {language}")
             continue
 
+        if language in ("am", "ti", "ar") and not has_uroman:
+            print(f"[skip] {language} needs uroman — install it and re-run")
+            continue
+
         repo = f"facebook/mms-tts-{code}"
         print(f"\n=== {language} ({repo}) — {len(items)} message(s) ===")
         try:
@@ -132,8 +159,8 @@ def main() -> int:
             out = AUDIO / f"{language}_{digest}.wav"
 
             if out.exists():
-                print(f"  [cached] {item['district']}")
-                manifest[item["id"]] = out.name
+                print(f"  [cached] {item['admin_name']}")
+                manifest[item["advisory_id"]] = out.name
                 continue
 
             inputs = tokenizer(body, return_tensors="pt")
@@ -145,10 +172,10 @@ def main() -> int:
                 rate=model.config.sampling_rate,
                 data=waveform.squeeze().cpu().numpy(),
             )
-            manifest[item["id"]] = out.name
+            manifest[item["advisory_id"]] = out.name
             seconds = waveform.shape[-1] / model.config.sampling_rate
             print(
-                f"  [ok] {item['district']:16} {seconds:5.1f}s  "
+                f"  [ok] {item['admin_name']:16} {seconds:5.1f}s  "
                 f"{out.stat().st_size // 1024:4d} KB  {out.name}"
             )
 
