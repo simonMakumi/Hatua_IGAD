@@ -20,13 +20,16 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY hatua ./hatua
 COPY scripts ./scripts
 
-# Ship the last snapshot if one was built, so the container serves real
-# advisories the instant it starts rather than an empty dashboard while the
-# first pipeline run completes.
-COPY data ./data
-
-# Writable cache for HTTP responses and snapshots.
+# Writable dirs for the HTTP cache and the advisory snapshot.
 RUN mkdir -p /app/.cache /app/data
+
+# Ship the last snapshot so the container serves real advisories the instant it
+# starts, rather than an empty dashboard while the first pipeline run completes.
+#
+# data/ must exist in the repo for this to work — Docker fails the entire build
+# on a missing COPY source, which is what broke the first Render deploy. There
+# is a committed data/snapshot.json and a .gitkeep so it always does.
+COPY data ./data
 
 EXPOSE 8000
 
