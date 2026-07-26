@@ -156,6 +156,22 @@ renders properly."
 
 "And a real SMS, on a real Safaricom handset."
 
+> *[Browser — open https://hatua.onrender.com/audio/am_….wav and let it play]*
+
+"And for people who can't read it — about half the adult women in Ethiopia and
+Somalia — the same advisory as audio."
+
+> *[Let 5–6 seconds of Amharic play. Do not talk over it.]*
+
+"That's Amharic. There's also Somali, Afaan Oromo and English.
+
+Afaan Oromo and Tigrinya aren't supported by any commercial text-to-speech
+service anywhere — not Azure, not Google, not Amazon, not ElevenLabs. We used
+Meta's open MMS models, which cover all of them.
+
+And that URL isn't a demo file. It's the IVR path — it's what Africa's Talking
+fetches and plays down the phone line."
+
 ---
 
 ## 3:30–4:10 — The engineering nobody else did

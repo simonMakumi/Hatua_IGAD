@@ -351,12 +351,54 @@ Stated because judges in this field have watched a lot of teams overclaim.
   templates. All five deterministic checks still apply in full.
 
   We never auto-transliterate a life-safety warning.
-- **No commercial TTS supports Afaan Oromo or Tigrinya.** Azure covers Amharic,
-  Somali and Swahili. For the other two the honest answer is a bounded
-  pre-recorded human phrase bank — hazard × severity × location is a finite set.
 - **HATUA is not an alerting authority.** The CAP feed is marked
   `status=Exercise` and certainty never exceeds `Likely`, because we forecast
   and fuse; we do not observe.
+---
+
+## Voice: reaching people who cannot read the advisory
+
+Adult literacy is roughly 60% in Ethiopia and 54% in Somalia, and materially
+lower among women — **50% of Ethiopian women and 44% of Somali women**. A
+text-only early warning system therefore cannot reach about half the adult
+women in two of the countries most exposed to drought. Those are also the
+people who manage household water and take children to a health facility.
+
+Neither Twilio's nor Africa's Talking's `<Say>` verb helps: both route to
+Google Cloud TTS, which has **no GA voice** for Swahili, Amharic, Somali,
+Afaan Oromo or Tigrinya. So audio must be pre-rendered and served to the
+telephony provider as a URL via `<Play>`.
+
+We use **Meta's open-weights MMS-TTS**, which covers **all seven languages we
+issue advisories in — including Afaan Oromo and Tigrinya, which no commercial
+cloud TTS supports anywhere**: not Azure, Google, Amazon, OpenAI or ElevenLabs.
+
+```
+data/audio/  am_….wav   Amharic       ✅ rendered
+             so_….wav   Somali        ✅ rendered
+             om_….wav   Afaan Oromo   ✅ rendered
+             en_….wav   English       ✅ rendered
+```
+
+Served live at `/audio/<filename>` — that URL is the actual IVR path, what
+Africa's Talking fetches and plays down a phone line.
+
+`scripts/render_audio.py` renders offline; the deployed service never loads a
+TTS model. Two things that will bite anyone reproducing this:
+
+- **MMS needs `uroman` for non-Latin scripts.** Without it, transformers emits
+  a warning and *carries on*, producing a WAV that sounds like speech and does
+  not say what the advisory says. That failure mode is worse than a crash, so
+  the script refuses to render Ge'ez or Arabic script unless `uroman` imports.
+- **Afaan Oromo is `orm`, not `gaz`.** `facebook/mms-tts-gaz`, `-gax`, `-hae`
+  and `-orc` do not exist, despite `gaz` (West Central Oromo) being the more
+  precise ISO 639-3 code. Meta published under the macrolanguage code.
+
+Licence is CC-BY-NC-4.0 — fine here, a hard stop if commercialised. For
+production the stronger answer remains a native-speaker phrase bank: for early
+warning, hazard × severity × district is a *bounded* set, so it is recordable
+in an afternoon and would beat any synthesis. MMS gets us real, correct-language
+audio today.
 
 ---
 
