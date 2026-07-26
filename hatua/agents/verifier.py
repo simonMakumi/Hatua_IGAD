@@ -164,7 +164,7 @@ class _SemanticVerdict(BaseModel):
         description="True if the message's urgency matches the stated severity "
                     "and does not escalate beyond it."
     )
-    reasoning: str = Field(max_length=600)
+    reasoning: str = Field(max_length=2000)
 
 
 VERIFIER_SYSTEM = """\
@@ -342,7 +342,20 @@ class Verifier:
         # Only runs if the deterministic checks passed. A model cannot be
         # trusted to overrule arithmetic, so its vote can block but never
         # rescue.
-        if not self.use_llm:
+        if advisory.source == "template":
+            # Assembled from pre-reviewed sentences with only verified numerals
+            # and place names substituted. There is no generated prose here for
+            # a semantic check to examine, and the models we have available
+            # cannot read these languages well enough to judge them — in
+            # testing they rejected correct Afaan Oromo templates. The five
+            # deterministic checks above still ran in full.
+            record(
+                "semantic_faithfulness",
+                True,
+                "pre-reviewed template — no generated prose to verify; "
+                "deterministic checks applied in full",
+            )
+        elif not self.use_llm:
             record("semantic_faithfulness", True, "LLM check disabled")
         elif blocked:
             record(

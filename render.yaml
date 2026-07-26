@@ -21,10 +21,16 @@ services:
     autoDeploy: true
     envVars:
       # --- Reasoning core ---
+      # Provider-agnostic by design. Free-tier quota is metered per model and
+      # per project, so being able to move providers with one variable is an
+      # operational requirement, not a nicety — we exhausted a full Gemini day
+      # during development and switched to Groq without touching code.
       - key: LLM_PROVIDER
-        value: gemini
-      - key: GEMINI_API_KEY
+        value: groq
+      - key: GROQ_API_KEY
         sync: false            # set in the Render dashboard, never in git
+      - key: GEMINI_API_KEY
+        sync: false            # fallback provider
 
       # --- Humanitarian data (not a secret; self-generated base64) ---
       - key: HDX_HAPI_APP_IDENTIFIER

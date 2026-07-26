@@ -15,6 +15,32 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
+
+class _LenientEnum(Enum):
+    """Enum that accepts whatever a language model actually returns.
+
+    Different providers stringify enums differently and none of them are
+    reliable about it: Gemini returns lowercase values, Groq's Llama returns
+    ``'WARNING'``, and models generally will hand back the enum *name*
+    (``'HEAVY_RAIN'``) as readily as its value (``'heavy_rain'``).
+
+    Rejecting those costs a full retry — and in the Verifier's case, a failed
+    parse means the advisory is blocked, so strictness here would turn a
+    cosmetic formatting difference into a silently dropped warning. We
+    normalise instead. Strictness belongs on what we *send*, not on what we
+    tolerate from a model.
+    """
+
+    @classmethod
+    def _missing_(cls, value: object) -> "Any":
+        if not isinstance(value, str):
+            return None
+        needle = value.strip().lower().replace(" ", "_").replace("-", "_")
+        for member in cls:
+            if str(member.value).lower() == needle or member.name.lower() == needle:
+                return member
+        return None
+
 # ---------------------------------------------------------------------------
 # Geography
 # ---------------------------------------------------------------------------
@@ -74,7 +100,7 @@ class AdminUnit(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class HazardType(str, Enum):
+class HazardType(str, _LenientEnum):
     DROUGHT = "drought"
     FLOOD = "flood"
     HEAVY_RAIN = "heavy_rain"
@@ -88,7 +114,7 @@ class HazardType(str, Enum):
     EARTHQUAKE = "earthquake"
 
 
-class Severity(str, Enum):
+class Severity(str, _LenientEnum):
     """Ordered severity ladder. The Verifier enforces that severity is never
     asserted above what the confidence band supports."""
 
@@ -112,7 +138,7 @@ _SEVERITY_RANK = {
 }
 
 
-class Confidence(str, Enum):
+class Confidence(str, _LenientEnum):
     LOW = "low"          # < 0.4
     MODERATE = "moderate"  # 0.4 - 0.65
     HIGH = "high"        # 0.65 - 0.85
@@ -299,7 +325,7 @@ class ImpactHypothesis(BaseModel):
 
     pcode: str
     hazard: HazardType
-    summary: str = Field(max_length=1200)
+    summary: str = Field(max_length=3000)
     physical_mechanism: str
     exposed_groups: list[str]
     estimated_people_affected: int | None = None
@@ -313,7 +339,7 @@ class ImpactHypothesis(BaseModel):
     uncertainties: list[str] = Field(default_factory=list)
 
 
-class ActorType(str, Enum):
+class ActorType(str, _LenientEnum):
     PASTORALIST = "pastoralist"
     FARMER = "farmer"
     HOUSEHOLD = "household"
@@ -358,7 +384,7 @@ class ActionPlan(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class Language(str, Enum):
+class Language(str, _LenientEnum):
     ENGLISH = "en"
     SWAHILI = "sw"
     SOMALI = "so"
@@ -379,7 +405,7 @@ class Language(str, Enum):
         )
 
 
-class Channel(str, Enum):
+class Channel(str, _LenientEnum):
     SMS = "sms"
     USSD = "ussd"
     VOICE = "voice"
@@ -392,7 +418,7 @@ class Channel(str, Enum):
         return self in (Channel.SMS, Channel.USSD)
 
 
-class VerificationStatus(str, Enum):
+class VerificationStatus(str, _LenientEnum):
     PENDING = "pending"
     PASSED = "passed"
     BLOCKED = "blocked"
@@ -444,6 +470,14 @@ class Advisory(BaseModel):
     segment_count: int | None = None
     septet_count: int | None = None
 
+    # How the text was produced. Template-rendered advisories are assembled
+    # from sentences a native speaker has already reviewed, with only numerals
+    # and place names substituted — so there is no free-form generation for a
+    # semantic check to catch. Asking a model that cannot read Afaan Oromo to
+    # adjudicate Afaan Oromo would be circular, and in testing it rejected
+    # correct templates. Deterministic checks still apply in full.
+    source: Literal["generated", "template"] = "generated"
+
     verification: VerificationResult | None = None
 
     @property
@@ -456,7 +490,7 @@ class Advisory(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class FeedbackKind(str, Enum):
+class FeedbackKind(str, _LenientEnum):
     RAIN_RECEIVED = "rain_received"
     NO_RAIN = "no_rain"
     FLOODING_OBSERVED = "flooding_observed"

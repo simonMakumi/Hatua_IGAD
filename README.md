@@ -325,11 +325,32 @@ Stated because judges in this field have watched a lot of teams overclaim.
   states and USSD in 2. Somalia has six zone-monopoly operators and no single
   aggregator reaching the country. Eritrea is effectively unreachable
   programmatically.
-- **Machine translation degrades badly on Amharic and Tigrinya.** Google
-  Translate scores 75.8 chrF++ on Swahili but 30.2 on Amharic; Tigrinya is not
-  benchmarked at all. Safety-critical templates must be pre-translated and
-  human-verified; only variable slots are machine-translated. We never
-  auto-transliterate a life-safety warning.
+- **We do not generate freely into low-resource languages, because we measured
+  it failing.** Asked for an Amharic drought advisory for Somali Region,
+  Ethiopia, a 70B model produced text back-translating to roughly *"there is a
+  medical violation in the ground, Amhara region"* — incoherent, and naming the
+  wrong region. Afaan Oromo was comparably bad. This matches the literature:
+  Google Translate scores 75.8 chrF++ on Swahili and **30.2 on Amharic**;
+  Tigrinya is not benchmarked at all; small general-purpose LLMs score 3–11,
+  which is noise.
+
+  So **Amharic, Tigrinya, Afaan Oromo and Arabic go through pre-translated
+  templates** (`hatua/agents/templates.py`) — fixed, reviewed sentences with
+  only numerals, place names and dates substituted. English, Kiswahili and
+  Somali are generated and verified as normal.
+
+  The point of the template file is that **a native speaker can read the entire
+  surface area of what HATUA will ever say in Amharic in one sitting.** That is
+  the only review that means anything. Where no reviewed template exists, we
+  emit nothing — an honest silence beats a message a native speaker would not
+  recognise as their language.
+
+  Template advisories skip the *semantic* verification step and are marked
+  `source="template"`, because asking a model that cannot read Afaan Oromo to
+  adjudicate Afaan Oromo is circular — in testing it rejected correct
+  templates. All five deterministic checks still apply in full.
+
+  We never auto-transliterate a life-safety warning.
 - **No commercial TTS supports Afaan Oromo or Tigrinya.** Azure covers Amharic,
   Somali and Swahili. For the other two the honest answer is a bounded
   pre-recorded human phrase bank — hazard × severity × location is a finite set.

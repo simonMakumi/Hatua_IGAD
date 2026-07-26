@@ -99,6 +99,11 @@ PROVIDERS: dict[str, ProviderSpec] = {
         default_model="llama-3.3-70b-versatile",
         env_key="GROQ_API_KEY",
         style="openai",
+        fallbacks=(
+            "llama-3.1-8b-instant",
+            "openai/gpt-oss-120b",
+            "openai/gpt-oss-20b",
+        ),
     ),
     "cerebras": ProviderSpec(
         name="cerebras",
@@ -292,7 +297,20 @@ class LLM:
                 },
             )
 
-        # OpenAI-compatible: groq, cerebras, openrouter
+        # OpenAI-compatible: groq, cerebras, openrouter.
+        #
+        # Unlike Gemini's responseSchema, `json_object` mode only guarantees
+        # *valid JSON* — not JSON matching our shape. Observed on Groq: asked
+        # for {hazard, actions}, it returned the JSON Schema document itself
+        # ({"hazard": {"type": "Drought"}}) rather than values, costing a retry
+        # every call. So we inline the schema into the system prompt and say
+        # explicitly what we do not want.
+        schema_hint = (
+            f"\n\nRespond with a single JSON object matching this schema. "
+            f"Return the VALUES, not the schema document itself. Do not "
+            f"include 'type', 'properties' or '$defs' keys.\n"
+            f"{json.dumps(schema, separators=(',', ':'))}"
+        )
         return (
             f"{self.spec.base_url}/chat/completions",
             {
@@ -305,7 +323,7 @@ class LLM:
                 "max_tokens": max_tokens,
                 "response_format": {"type": "json_object"},
                 "messages": [
-                    {"role": "system", "content": system},
+                    {"role": "system", "content": system + schema_hint},
                     {"role": "user", "content": user},
                 ],
             },

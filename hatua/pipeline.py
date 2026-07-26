@@ -22,6 +22,7 @@ from .agents.core import (
     default_languages,
     render_evidence,
 )
+from .agents import templates
 from .agents.llm import LLM
 from .agents.verifier import Verifier
 from .delivery.encoding import (
@@ -162,21 +163,46 @@ async def run_district(
 
         for language in languages:
             for channel in channels:
-                try:
-                    body = await localizer.render(
+                limit = channel_char_limit(channel, language)
+
+                # Low-resource languages do not go through free-form
+                # generation. We measured a 70B model producing incoherent
+                # Amharic that named the wrong region entirely; published
+                # benchmarks put small LLMs at 3-11 chrF++ on Amharic, Tigrinya
+                # and Afaan Oromo, which is noise. For messages people act on
+                # irreversibly, that is not an acceptable input.
+                if templates.is_template_only(language):
+                    body = templates.render(
                         plan,
-                        hypothesis,
-                        assessment,
-                        language=language,
-                        channel=channel,
-                        char_limit=channel_char_limit(channel, language),
+                        assessment.admin_name,
+                        language,
+                        char_limit=limit,
+                        window_end=trigger.window_end,
                     )
-                except Exception as exc:  # noqa: BLE001
-                    result.errors.append(
-                        f"{trigger.threshold_name}/{language.value}/"
-                        f"{channel.value}: {type(exc).__name__}: {exc}"
-                    )
-                    continue
+                    if body is None:
+                        # Honest silence beats a message a native speaker
+                        # would not recognise as their language.
+                        result.errors.append(
+                            f"{trigger.threshold_name}/{language.value}: no "
+                            f"reviewed template for this hazard and severity"
+                        )
+                        continue
+                else:
+                    try:
+                        body = await localizer.render(
+                            plan,
+                            hypothesis,
+                            assessment,
+                            language=language,
+                            channel=channel,
+                            char_limit=limit,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        result.errors.append(
+                            f"{trigger.threshold_name}/{language.value}/"
+                            f"{channel.value}: {type(exc).__name__}: {exc}"
+                        )
+                        continue
 
                 # Normalise and measure before verification, so the encoding
                 # metadata is carried on the advisory the caller receives
@@ -209,6 +235,9 @@ async def run_district(
                     encoding=sms.encoding,
                     segment_count=sms.segments,
                     septet_count=sms.units,
+                    source="template"
+                    if templates.is_template_only(language)
+                    else "generated",
                 )
 
                 verification = await verifier.verify(

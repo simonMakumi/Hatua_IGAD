@@ -210,7 +210,7 @@ class _SelectedAction(BaseModel):
     action_id: str
     actor: ActorType
     contextual_note: str = Field(
-        max_length=300,
+        max_length=600,
         description="One sentence tying the standard action to this specific "
                     "district and window. Must not contradict the action.",
     )
@@ -219,7 +219,7 @@ class _SelectedAction(BaseModel):
 class _PlannerOutput(BaseModel):
     severity: Severity
     selected: list[_SelectedAction] = Field(min_length=1, max_length=6)
-    reasoning: str = Field(max_length=800)
+    reasoning: str = Field(max_length=2000)
 
 
 PLANNER_SYSTEM = """\
@@ -460,9 +460,32 @@ class Localizer:
             )
         )
 
+        # Distinguish a hazard that is forecast from one already underway.
+        # Without this the model writes "get ready for food insecurity" to a
+        # district already at IPC Phase 4, which is both wrong and insulting —
+        # and the Verifier correctly blocks it as an unsupported claim about
+        # the future. The severity register controls urgency; this controls
+        # tense.
+        v = assessment.vulnerability
+        already_present = bool(
+            (plan.hazard is HazardType.FOOD_INSECURITY and v.ipc_phase and v.ipc_phase >= 3)
+            or (plan.hazard is HazardType.DISPLACEMENT and v.idps and v.idps > 10_000)
+            or (plan.hazard is HazardType.CONFLICT and v.conflict_events_90d
+                and v.conflict_events_90d > 25)
+        )
+        tense = (
+            "THIS CONDITION IS ALREADY PRESENT, not forecast. Do NOT write "
+            "'prepare for' or 'get ready for' — it is already happening. "
+            "Write about worsening, or about acting now.\n"
+            if already_present
+            else "This condition is FORECAST, not yet observed. Do not state "
+                 "it as already happening.\n"
+        )
+
         user = (
             f"PLACE: {assessment.admin_name}, {assessment.country_iso3}\n"
             f"HAZARD: {plan.hazard.value}\n"
+            f"{tense}"
             f"SEVERITY: {plan.severity.value} — tone must be "
             f"{SEVERITY_VERBS[plan.severity]}\n"
             f"WINDOW: {hypothesis.onset_window_start} to "
