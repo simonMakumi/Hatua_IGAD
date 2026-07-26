@@ -246,8 +246,15 @@ async def health() -> dict[str, Any]:
         "last_error": STATE.last_error,
         "districts_assessed": len(STATE.results),
         "advisories_total": len(STATE.all_advisories),
-        "advisories_dispatchable": len(STATE.advisories),
+        # Count advisories, not cache entries. STATE.advisories is keyed by
+        # (pcode, language) for the USSD lookup, so it collapses the SMS and
+        # Telegram variants of the same message into one — reporting its length
+        # as "dispatchable" made the numbers fail to add up on the dashboard.
+        "advisories_dispatchable": sum(
+            1 for a in STATE.all_advisories if a.dispatchable
+        ),
         "advisories_blocked": len(STATE.blocked),
+        "ussd_cache_entries": len(STATE.advisories),
         "feedback_received": len(STATE.feedback),
         "llm_providers_configured": {
             k: v for k, v in available_providers().items() if v

@@ -177,12 +177,17 @@ async function load(){
     ' · '+Object.keys(health.llm_providers_configured||{}).join(',')+
     ' · SMS '+health.sms_provider+(health.dry_run?' (dry run)':'');
 
+  const pass_=advisories.filter(a=>a.dispatchable).length;
+  const block_=advisories.filter(a=>!a.dispatchable).length;
   document.getElementById('k-districts').textContent=districts.length;
-  document.getElementById('k-sent').textContent=
-    advisories.filter(a=>a.dispatchable).length;
-  document.getElementById('k-blocked').textContent=
-    advisories.filter(a=>!a.dispatchable).length;
+  document.getElementById('k-sent').textContent=pass_;
+  document.getElementById('k-blocked').textContent=block_;
   document.getElementById('k-acted').textContent=feedback.acted||0;
+  // Blocked rate is the number worth watching. Zero would mean the verifier
+  // is not doing anything; very high would mean it is over-blocking.
+  const rate=(pass_+block_)? Math.round(block_*100/(pass_+block_)) : 0;
+  document.querySelector('#k-blocked').nextElementSibling.textContent=
+    'Blocked ('+rate+'%)';
 
   // --- ranking table ---
   const tb=document.querySelector('#ranking tbody'); tb.innerHTML='';
