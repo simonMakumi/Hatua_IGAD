@@ -34,6 +34,7 @@ from ..delivery.ussd import USSDMenu, USSDRequest
 from ..fusion.engine import explain
 from ..models import (
     AdminUnit,
+    Channel,
     Advisory,
     CommunityFeedback,
     FeedbackKind,
@@ -71,19 +72,45 @@ class State:
         self.advisories = {}
         for result in results:
             for advisory in result.advisories:
-                # USSD reads this dict. Only dispatchable advisories are
-                # indexed, so an unverified message cannot reach a caller even
-                # by accident.
+                # Keyed by channel as well as language. Keying only by
+                # (pcode, language) collapsed the SMS and Telegram variants of
+                # one message into a single entry — Telegram won, and USSD then
+                # served a hard-truncated 160-char slice of a 900-char message
+                # that had been verified against a 900-char budget. Observed
+                # cutting an instruction mid-sentence and dropping the deadline.
+                #
+                # Only dispatchable advisories are indexed, so an unverified
+                # message cannot reach a caller even by accident.
                 if advisory.dispatchable:
                     self.advisories[
-                        (advisory.pcode, advisory.language.value)
+                        (advisory.pcode, advisory.language.value,
+                         advisory.channel.value)
                     ] = advisory
         self.last_run = datetime.now(timezone.utc)
 
-    def lookup(self, pcode: str, language: Language) -> Advisory | None:
-        return self.advisories.get((pcode, language.value)) or self.advisories.get(
-            (pcode, Language.ENGLISH.value)
+    def lookup(
+        self,
+        pcode: str,
+        language: Language,
+        channel: Channel = Channel.SMS,
+    ) -> Advisory | None:
+        """Find an advisory verified for this channel.
+
+        Falls back by channel first, then by language — never the other way
+        round. A message verified for a longer channel is not safe to truncate
+        into a shorter one, so we prefer the right length in the wrong language
+        over the right language at the wrong length.
+        """
+        order = (
+            [Channel.USSD, Channel.SMS] if channel is Channel.USSD
+            else [channel, Channel.SMS, Channel.TELEGRAM]
         )
+        for lang in (language, Language.ENGLISH):
+            for ch in order:
+                hit = self.advisories.get((pcode, lang.value, ch.value))
+                if hit:
+                    return hit
+        return None
 
     def record_feedback(
         self, pcode: str, phone: str, kind: FeedbackKind
@@ -164,7 +191,9 @@ class State:
                 for f in payload.get("feedback", [])
             ]
             self.advisories = {
-                (a.pcode, a.language.value): a for a in advisories if a.dispatchable
+                (a.pcode, a.language.value, a.channel.value): a
+                for a in advisories
+                if a.dispatchable
             }
             self.subscribers.load_json(payload.get("subscribers", []))
             self.last_run = (
@@ -471,7 +500,11 @@ def _menu() -> USSDMenu:
             STATE.results, key=lambda r: -r.assessment.compound_risk_score
         )
     ] or [(p, u.name) for p, u in DEMO_UNITS.items()]
-    return USSDMenu(districts, STATE.lookup, STATE.record_feedback)
+    return USSDMenu(
+        districts,
+        lambda p, l: STATE.lookup(p, l, Channel.USSD),
+        STATE.record_feedback,
+    )
 
 
 @app.post("/ussd", response_class=PlainTextResponse)
@@ -570,8 +603,17 @@ async def voice_callback(
         None,
     )
     if advisory is None:
+        # No pre-rendered audio. Fall back to TTS only for ENGLISH — the
+        # fallback voice is en-KE, and reading a Somali or Amharic body with an
+        # English voice produces something the listener cannot act on and may
+        # not even recognise as their language. Saying nothing is better.
         fallback = next(
-            (a for a in top.advisories if a.dispatchable), None
+            (
+                a
+                for a in top.advisories
+                if a.dispatchable and a.language is Language.ENGLISH
+            ),
+            None,
         )
         return voice.ivr_xml(
             None, fallback_text=fallback.body if fallback else ""
@@ -596,14 +638,17 @@ def _bot_handler() -> BotHandler:
     return BotHandler(
         store=STATE.subscribers,
         districts=lambda: districts,
-        advisory_lookup=STATE.lookup,
+        advisory_lookup=lambda p, l: STATE.lookup(p, l, Channel.TELEGRAM),
         record_feedback=STATE.record_feedback,
         render_advisory=telegram.render,
-        languages_for=lambda pcode: [
-            Language(lang)
-            for (p, lang) in STATE.advisories
-            if p == pcode
-        ],
+        languages_for=lambda pcode: sorted(
+            {
+                Language(lang)
+                for (p, lang, _ch) in STATE.advisories
+                if p == pcode
+            },
+            key=lambda l: l.value,
+        ),
     )
 
 
@@ -717,6 +762,39 @@ async def subscribers() -> dict[str, Any]:
         "active": STATE.subscribers.active_count,
         "by_district": by_district,
     }
+
+
+@app.post("/voice/feedback", response_class=PlainTextResponse)
+async def voice_feedback(
+    dtmfDigits: str = Form(default=""),
+    callerNumber: str = Form(default=""),
+    sessionId: str = Form(default=""),
+) -> str:
+    """Keypad feedback from an IVR call.
+
+    ivr_xml has always posted here; the route did not exist, so every caller
+    who pressed a key got a 404 and the call dropped. Caught in audit.
+    """
+    mapping = {
+        "1": FeedbackKind.RAIN_RECEIVED,
+        "2": FeedbackKind.NO_RAIN,
+        "3": FeedbackKind.FLOODING_OBSERVED,
+        "4": FeedbackKind.LIVESTOCK_MOVED,
+        "5": FeedbackKind.NEED_HELP,
+    }
+    kind = mapping.get(dtmfDigits.strip())
+    ranked = sorted(
+        STATE.results, key=lambda r: -r.assessment.compound_risk_score
+    )
+    if kind and ranked:
+        STATE.record_feedback(
+            ranked[0].assessment.pcode, callerNumber, kind
+        )
+    return (
+        "<?xml version='1.0' encoding='UTF-8'?>\n"
+        "<Response><Say>Thank you. Your report has been recorded.</Say>"
+        "</Response>"
+    )
 
 
 @app.get("/", response_class=HTMLResponse)

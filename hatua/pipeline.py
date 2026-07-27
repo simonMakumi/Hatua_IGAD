@@ -166,7 +166,9 @@ async def run_district(
     verifier = Verifier(llm)
 
     languages = languages or default_languages(unit.country_iso3)
-    channels = channels or [Channel.SMS, Channel.TELEGRAM]
+    # USSD gets its own advisory, verified against its own 160-char
+    # budget, rather than a truncated slice of a longer one.
+    channels = channels or [Channel.SMS, Channel.TELEGRAM, Channel.USSD]
 
     for trigger in assessment.triggers[:max_triggers]:
         evidence = render_evidence(assessment, trigger)
