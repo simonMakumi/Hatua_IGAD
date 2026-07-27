@@ -599,6 +599,11 @@ def _bot_handler() -> BotHandler:
         advisory_lookup=STATE.lookup,
         record_feedback=STATE.record_feedback,
         render_advisory=telegram.render,
+        languages_for=lambda pcode: [
+            Language(lang)
+            for (p, lang) in STATE.advisories
+            if p == pcode
+        ],
     )
 
 

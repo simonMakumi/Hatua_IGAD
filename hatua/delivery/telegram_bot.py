@@ -177,13 +177,30 @@ def district_keyboard(districts: list[tuple[str, str]]) -> dict[str, Any]:
     return {"inline_keyboard": rows}
 
 
-def language_keyboard() -> dict[str, Any]:
+def language_keyboard(
+    available: list[Language] | None = None,
+) -> dict[str, Any]:
+    """Offer only languages that actually exist for the user's district.
+
+    Advisories are generated per country — Ethiopia gets Amharic, Afaan Oromo,
+    Somali and English; Kenya gets Kiswahili, English and Somali. Offering
+    Kiswahili to someone in Somali Region, Ethiopia is offering something we
+    will never deliver, and the silent English fallback then reads as a bug
+    rather than as a language nobody there speaks.
+    """
+    options = LANGUAGE_BUTTONS
+    if available:
+        allowed = set(available)
+        options = [(label, l) for label, l in LANGUAGE_BUTTONS if l in allowed]
+    if not options:
+        options = [("English", Language.ENGLISH)]
+
     rows = []
-    for i in range(0, len(LANGUAGE_BUTTONS), 2):
+    for i in range(0, len(options), 2):
         rows.append(
             [
                 {"text": label, "callback_data": f"lang:{lang.value}"}
-                for label, lang in LANGUAGE_BUTTONS[i : i + 2]
+                for label, lang in options[i : i + 2]
             ]
         )
     return {"inline_keyboard": rows}
@@ -232,12 +249,19 @@ class BotHandler:
         advisory_lookup: Callable[[str, Language], Advisory | None],
         record_feedback: Callable[[str, str, FeedbackKind], None],
         render_advisory: Callable[[Advisory], str],
+        languages_for: Callable[[str], list[Language]] | None = None,
     ) -> None:
         self.store = store
         self.districts = districts
         self.lookup = advisory_lookup
         self.record_feedback = record_feedback
         self.render = render_advisory
+        # Which languages actually have an advisory for a given district.
+        self.languages_for = languages_for or (lambda _p: [])
+
+    def _available(self, chat_id: int) -> list[Language]:
+        sub = self.store.get(chat_id)
+        return self.languages_for(sub.pcode) if sub and sub.pcode else []
 
     def handle(self, update: dict[str, Any]) -> BotReply | None:
         if "callback_query" in update:
@@ -266,7 +290,14 @@ class BotHandler:
                 district_keyboard(self.districts()),
             )
         if text.startswith("/language"):
-            return BotReply(chat_id, "Choose your language:", language_keyboard())
+            available = self._available(chat_id)
+            note = (
+                "Choose your language:"
+                if not available
+                else "Choose your language.\n<i>These are the languages "
+                     "advisories are issued in for your area.</i>"
+            )
+            return BotReply(chat_id, note, language_keyboard(available))
         if text.startswith("/stop"):
             self.store.deactivate(chat_id)
             return BotReply(
@@ -329,9 +360,18 @@ class BotHandler:
                 "<i>That is good news — and it is also a real answer. We do "
                 "not send a warning unless the data supports one.</i>",
             )
-        return BotReply(
-            chat_id, self.render(advisory), feedback_keyboard(sub.pcode)
-        )
+        text = self.render(advisory)
+        if advisory.language != sub.language:
+            # Be explicit. A silent switch reads as a bug, and quietly serving
+            # a language the reader did not ask for is exactly the kind of
+            # thing that erodes trust in a warning.
+            text = (
+                f"<i>No advisory is issued in your chosen language for "
+                f"{advisory.admin_name}. Showing "
+                f"{advisory.language.value.upper()} instead — send /language "
+                f"to see what is available here.</i>\n\n{text}"
+            )
+        return BotReply(chat_id, text, feedback_keyboard(sub.pcode))
 
     # -- callbacks ---------------------------------------------------------
 
@@ -363,9 +403,18 @@ class BotHandler:
             except ValueError:
                 return None
             self.store.upsert(chat_id, language=language)
+            available = self._available(chat_id)
+            if available and language not in available:
+                body = (
+                    f"<b>Language saved.</b>\n\n<i>Note: advisories for your "
+                    f"area are not issued in this language, so you will "
+                    f"receive them in English. Send /language to see what is "
+                    f"available.</i>"
+                )
+            else:
+                body = "<b>Language set.</b> Send /alert for the current advisory."
             return BotReply(
-                chat_id,
-                f"<b>Language set.</b> Send /alert for the current advisory.",
+                chat_id, body,
                 callback_query_id=query_id,
                 answer_callback="Language updated",
             )
