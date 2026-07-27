@@ -222,13 +222,40 @@ async def refresh(top_n: int = 4) -> None:
         STATE.running = False
 
 
+# How stale the snapshot may be before a cold start is allowed to regenerate.
+# Free-tier instances sleep after 15 minutes and cold-start on the next
+# request, so an unconditional refresh on startup meant a full pipeline run —
+# and a full model-quota burn — several times an hour, regenerating advisories
+# that had not changed. Observed exhausting every Groq model's tokens-per-minute
+# budget on Render.
+SNAPSHOT_MAX_AGE_HOURS = 6
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Serve the last known state immediately, then refresh in the background.
-    # A warning system that is unavailable while it thinks is not much of a
-    # warning system.
-    STATE.load(SNAPSHOT)
-    asyncio.create_task(refresh())
+    # Serve the last known state immediately. A warning system that is
+    # unavailable while it thinks is not much of a warning system.
+    loaded = STATE.load(SNAPSHOT)
+
+    age_hours = (
+        (datetime.now(timezone.utc) - STATE.last_run).total_seconds() / 3600
+        if STATE.last_run
+        else None
+    )
+    stale = age_hours is None or age_hours > SNAPSHOT_MAX_AGE_HOURS
+
+    if not loaded or stale:
+        log.info(
+            "snapshot %s — refreshing in background",
+            "missing" if not loaded else f"{age_hours:.1f}h old",
+        )
+        asyncio.create_task(refresh())
+    else:
+        log.info(
+            "snapshot is %.1fh old — serving it and skipping refresh. "
+            "POST /refresh to force one.",
+            age_hours,
+        )
     yield
 
 

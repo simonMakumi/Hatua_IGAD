@@ -142,14 +142,41 @@ def _retry_delay_seconds(response: httpx.Response) -> float | None:
         except ValueError:
             pass
     try:
-        details = response.json().get("error", {}).get("details", [])
-        for entry in details:
+        payload = response.json()
+        error = payload.get("error", {})
+
+        # Google: structured RetryInfo in error.details
+        for entry in error.get("details", []) or []:
             delay = entry.get("retryDelay")
             if isinstance(delay, str) and delay.endswith("s"):
                 return float(delay[:-1])
+
+        # Groq: buried in prose — "Please try again in 3.01s."
+        message = error.get("message", "")
+        match = re.search(r"try again in ([\d.]+)s", message)
+        if match:
+            return float(match.group(1))
     except (json.JSONDecodeError, ValueError, AttributeError, TypeError):
         pass
     return None
+
+
+def _is_token_rate_limit(response: httpx.Response) -> bool:
+    """Distinguish a tokens-per-minute limit from an exhausted daily quota.
+
+    The difference decides the right response. A TPM limit clears in seconds,
+    so waiting is correct and switching models is wasteful — the sibling models
+    share the same organisation budget and will be limited too. A daily quota
+    does not clear, so falling back to another model is the only option.
+
+    Observed on Render: all four Groq models reported 429 within the same
+    second because the chain stampeded instead of waiting three seconds.
+    """
+    try:
+        message = response.json().get("error", {}).get("message", "").lower()
+    except (json.JSONDecodeError, AttributeError, TypeError):
+        return False
+    return "tokens per minute" in message or "tpm" in message
 
 
 def _extract_json(text: str) -> Any:
@@ -403,9 +430,25 @@ class LLM:
                     last = f"HTTP {r.status_code}: {r.text[:300]}"
                     log.warning("%s attempt %d: %s", self.spec.name, attempt, last)
                     if r.status_code in (429, 503):
-                        # Move down the model chain before waiting. A smaller
-                        # model answering now beats the right model answering
-                        # after the flood.
+                        delay = _retry_delay_seconds(r)
+
+                        # A tokens-per-minute limit clears in seconds and is
+                        # charged against the whole organisation, so every
+                        # sibling model is limited too. Wait; do not stampede.
+                        if r.status_code == 429 and _is_token_rate_limit(r):
+                            wait = delay or 15.0
+                            log.info(
+                                "%s: token-rate limited, waiting %.1fs "
+                                "(switching model would not help)",
+                                model_chain[model_index],
+                                wait,
+                            )
+                            await asyncio.sleep(wait)
+                            continue
+
+                        # Otherwise it is a per-model quota, which another
+                        # model may still have. A smaller model answering now
+                        # beats the right model answering after the flood.
                         if model_index + 1 < len(model_chain):
                             model_index += 1
                             log.warning(
@@ -415,9 +458,10 @@ class LLM:
                                 model_chain[model_index],
                             )
                             continue
-                        delay = _retry_delay_seconds(r) or 20.0
-                        log.info("all models rate limited, sleeping %.0fs", delay)
-                        await asyncio.sleep(delay)
+
+                        wait = delay or 20.0
+                        log.info("all models limited, sleeping %.0fs", wait)
+                        await asyncio.sleep(wait)
                         continue
                     if r.status_code in (500, 502, 529):
                         continue
