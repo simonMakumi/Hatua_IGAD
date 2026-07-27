@@ -22,7 +22,7 @@ Redis, no TTL bugs, and a pod restart mid-session is invisible to the user.
 timeout is 10 seconds and its response timeout is 15, but real handsets and
 real networks eat most of that. So **no LLM call, no forecast fetch, no
 translation may happen on this path.** Every advisory served here is
-pre-computed by the scheduler and read from cache. This constraint is the
+pre-computed by the refresh job and read from cache. This constraint is the
 reason the whole pipeline is built around generating advisories on a schedule
 rather than on demand — USSD dictated the architecture, not the other way
 round.

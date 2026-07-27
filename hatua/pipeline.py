@@ -32,7 +32,7 @@ from .delivery.encoding import (
     normalise_for_gsm7,
 )
 from .fusion.engine import assess
-from .ingest import gdacs, openmeteo
+from .ingest import cap as cap_ingest, gdacs, icpac, openmeteo
 from .ingest.base import Fetcher, IngestResult
 from .models import (
     AdminUnit,
@@ -87,14 +87,20 @@ async def gather_signals(
         if u.centroid_lat is not None and u.centroid_lon is not None
     }
 
-    forecast, flood, events = await asyncio.gather(
+    forecast, flood, events, regional = await asyncio.gather(
         openmeteo.fetch_forecast(fetcher, points, days=16),
         openmeteo.fetch_flood(fetcher, points, days=90),
         gdacs.fetch_events(fetcher, lookback_days=150),
+        # ICPAC is the WMO Regional Climate Centre for the Greater Horn. Its
+        # dataset currency tells us how fresh the authoritative regional
+        # picture is, which feeds both data_sufficiency and confidence — a
+        # drought advisory leaning on a forage forecast that is 85 days stale
+        # should not carry the same confidence as one issued yesterday.
+        icpac.fetch_dataset_currency(fetcher),
     )
 
     combined = IngestResult()
-    for part in (forecast, flood, events):
+    for part in (forecast, flood, events, regional):
         combined.extend(part)
 
     by_district: dict[str, list[SignalReading]] = {p: [] for p in units}
@@ -112,6 +118,18 @@ async def gather_signals(
             by_district[pcode].append(
                 reading.model_copy(update={"pcode": pcode})
             )
+
+    # ICPAC dataset-currency readings carry no pcode: they describe the state
+    # of the regional products, which apply across the whole GHA. Attach them
+    # to every district so freshness and source-family coverage are counted.
+    regional_readings = [
+        r for r in combined.readings
+        if r.source.startswith("icpac_") and not r.pcode
+    ]
+    for pcode in by_district:
+        by_district[pcode].extend(
+            r.model_copy(update={"pcode": pcode}) for r in regional_readings
+        )
 
     return by_district, combined
 
@@ -276,6 +294,8 @@ async def run(
 
     async with Fetcher() as fetcher:
         signals, _health = await gather_signals(fetcher, units)
+        # Official government alerts. These outrank anything we compute.
+        official, _cap_health = await cap_ingest.fetch_alerts(fetcher)
 
     # Score everything deterministically first, then reason only where it matters.
     ranked = sorted(
@@ -301,6 +321,9 @@ async def run(
                 signals.get(pcode, []),
                 vulnerability=context.get(pcode),
                 exposure=exposures.get(pcode),
+                cap_alerts=cap_ingest.alerts_for_country(
+                    official, unit.country_iso3
+                ),
                 languages=languages,
                 channels=channels,
                 llm=llm,

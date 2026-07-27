@@ -58,10 +58,26 @@ from .llm import LLM, LLMError
 
 log = logging.getLogger("hatua.verifier")
 
-# Numbers that carry no factual claim and need no provenance: small counts
-# ("2 days"), percentages of nothing, ordinals, and years within a plausible
-# window. Anything else must be traceable.
-_BENIGN_MAX = 31
+# Prefix marking a check that did not run, so it is never counted as a pass.
+_SKIPPED = "SKIPPED: "
+
+# Numbers small enough to be structural rather than factual: "under 5 years",
+# "within 14 days", "1. do this". Anything larger must be traceable.
+#
+# This was 31, which exempted rainfall in mm, SPI values, borehole counts, IPC
+# phase numbers and — the reason it was lowered — casualty figures. An audit
+# body reading "30 people died. 25 boreholes are dry. 28 mm fell." passed every
+# figure as benign. 20 still admits ages and short deadlines while catching the
+# range a fabricated impact claim actually lives in.
+_BENIGN_MAX = 20
+
+# Words that make a nearby number a factual claim regardless of size. "5 people
+# died" is not the same kind of 5 as "children under 5".
+_CLAIM_CONTEXT = re.compile(
+    r"(died|dead|death|killed|casualt|injur|destroy|lost|damage|"
+    r"displac|affect|mm|millimet|percent|%|phase)",
+    re.IGNORECASE,
+)
 
 _NUMBER_RE = re.compile(r"\d[\d,.٫٬]*")
 
@@ -73,10 +89,61 @@ _DIGIT_TRANSLATION = {
     for i, c in enumerate("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹")
 }
 
+# Ethiopic numerals (፩ ፪ ፫ … ፻ ፼) used in Amharic and Tigrinya.
+#
+# These are Unicode category **No**, not Nd, and `\d` does not match them — so
+# the generic decimal-folding below silently skipped every one. An Amharic
+# advisory carrying ፻፳፭ was invisible to numeric verification, in exactly the
+# languages this project makes a virtue of supporting. Caught in audit.
+_ETHIOPIC_DIGITS: dict[int, int] = {
+    0x1369: 1, 0x136A: 2, 0x136B: 3, 0x136C: 4, 0x136D: 5,
+    0x136E: 6, 0x136F: 7, 0x1370: 8, 0x1371: 9,
+    0x1372: 10, 0x1373: 20, 0x1374: 30, 0x1375: 40, 0x1376: 50,
+    0x1377: 60, 0x1378: 70, 0x1379: 80, 0x137A: 90,
+    0x137B: 100, 0x137C: 10_000,
+}
+
+
+def _fold_ethiopic(text: str) -> str:
+    """Replace runs of Ethiopic numerals with their ASCII value.
+
+    Ethiopic numerals are additive-multiplicative: ፻፳፭ is 100 + 20 + 5 = 125.
+    This is a deliberately simple evaluator — it will not perfectly render
+    every historical form, but it must not *miss* a numeral, because a missed
+    numeral is an unverified claim reaching a reader.
+    """
+    out: list[str] = []
+    run: list[int] = []
+
+    def flush() -> None:
+        if not run:
+            return
+        total = 0
+        group = 0
+        for value in run:
+            if value >= 100:
+                group = (group or 1) * value
+                total += group
+                group = 0
+            else:
+                group += value
+        out.append(str(total + group))
+        run.clear()
+
+    for ch in text:
+        value = _ETHIOPIC_DIGITS.get(ord(ch))
+        if value is not None:
+            run.append(value)
+        else:
+            flush()
+            out.append(ch)
+    flush()
+    return "".join(out)
+
 
 def _normalise_digits(text: str) -> str:
     """Fold Arabic-Indic and Ethiopic numerals to ASCII before scanning."""
-    text = text.translate(_DIGIT_TRANSLATION)
+    text = _fold_ethiopic(text.translate(_DIGIT_TRANSLATION))
     out = []
     for ch in text:
         if unicodedata.category(ch) == "Nd" and not ch.isascii():
@@ -242,18 +309,29 @@ class Verifier:
         # -- 1. Numeric fidelity -------------------------------------------
         allowed = _supported_values(trigger, assessment, hypothesis)
         found = _extract_numbers(advisory.body)
+        claim_context = bool(_CLAIM_CONTEXT.search(advisory.body))
+
+        def traceable(n: float) -> bool:
+            # 0.5% or half a unit, whichever is larger. The previous 2% band
+            # meant a stated 6,600,000 matched a true 6,524,000 — a 76,000
+            # person exaggeration passing as "traceable".
+            return any(
+                abs(n - a) <= max(0.5, abs(a) * 0.005) for a in allowed
+            )
+
         unsupported = [
             n
             for n in found
-            if n > _BENIGN_MAX
-            and not any(abs(n - a) < max(1.0, abs(a) * 0.02) for a in allowed)
+            # A small number is only exempt when nothing in the message frames
+            # it as a claim. "5 people died" is checked; "under 5 years" is not.
+            if (n > _BENIGN_MAX or claim_context) and not traceable(n)
         ]
         record(
             "numeric_fidelity",
             not unsupported,
-            f"{len(found)} figures found, all traceable"
+            f"{len(found)} figures checked, all traceable to a source reading"
             if not unsupported
-            else f"untraceable figures: {unsupported}",
+            else f"figures with no source reading: {unsupported}",
         )
 
         # -- 2. Action legitimacy ------------------------------------------
@@ -323,20 +401,50 @@ class Verifier:
             )
 
         # -- 5. Geographic sanity ------------------------------------------
-        place_ok = (
-            advisory.pcode == trigger.pcode
-            and assessment.admin_name.split()[0].lower()
-            in advisory.body.lower() + advisory.admin_name.lower()
-        )
-        record(
-            "geographic_sanity",
-            place_ok,
-            f"advisory scoped to {advisory.admin_name} ({advisory.pcode})"
-            if place_ok
-            else f"place mismatch: advisory {advisory.pcode}/"
-            f"{advisory.admin_name} vs trigger {trigger.pcode}/"
-            f"{trigger.admin_name}",
-        )
+        # An earlier version of this check searched the concatenation
+        # `body + admin_name` for the district name — which always contains it,
+        # so the check could never fail. It emitted a reassuring string naming
+        # a district that appeared nowhere in the message. Caught in audit by
+        # feeding it a body reading "Nairobi County: flooding tonight" against
+        # a Somali Region trigger: PASSED.
+        #
+        # The message body alone must name the place. A warning that does not
+        # tell you where it applies is worse than no warning: it is acted on
+        # by people it does not concern, and ignored by people it does.
+        body = advisory.body.lower()
+        tokens = [
+            t.lower()
+            for t in re.split(r"[\s,/()-]+", assessment.admin_name)
+            if len(t) > 2
+        ]
+        named = any(t in body for t in tokens) if tokens else False
+        scoped = advisory.pcode == trigger.pcode
+
+        if not tokens:
+            # No usable place token (single short name). Fall back to the
+            # pcode check rather than blocking, but say so.
+            record(
+                "geographic_sanity",
+                scoped,
+                f"scoped to {advisory.pcode}; district name too short to "
+                f"verify in body",
+            )
+        else:
+            record(
+                "geographic_sanity",
+                scoped and named,
+                f"body names '{assessment.admin_name}' and is scoped to "
+                f"{advisory.pcode}"
+                if scoped and named
+                else (
+                    f"body does not name the district "
+                    f"'{assessment.admin_name}' (looked for: "
+                    f"{', '.join(tokens)})"
+                    if scoped
+                    else f"pcode mismatch: advisory {advisory.pcode} vs "
+                    f"trigger {trigger.pcode}"
+                ),
+            )
 
         # -- 6. Semantic faithfulness (LLM) --------------------------------
         # Only runs if the deterministic checks passed. A model cannot be
@@ -352,11 +460,13 @@ class Verifier:
             record(
                 "semantic_faithfulness",
                 True,
-                "pre-reviewed template — no generated prose to verify; "
-                "deterministic checks applied in full",
+                f"{_SKIPPED}pre-reviewed template — no generated prose to "
+                f"verify; the five deterministic checks applied in full",
             )
         elif not self.use_llm:
-            record("semantic_faithfulness", True, "LLM check disabled")
+            record(
+                "semantic_faithfulness", True, f"{_SKIPPED}LLM check disabled"
+            )
         elif blocked:
             record(
                 "semantic_faithfulness",
@@ -391,12 +501,22 @@ class Verifier:
                         verdict.unsupported_claims[:4]
                     )
                 record("semantic_faithfulness", passed, detail[:500])
-            except LLMError as exc:
-                # Fail closed. An unavailable verifier is not permission to send.
+            except Exception as exc:  # noqa: BLE001
+                # Fail closed on ANYTHING, not just LLMError.
+                #
+                # This previously caught only LLMError, so any other exception
+                # escaped verify(), unwound run_district, and was swallowed by
+                # asyncio.gather(return_exceptions=True) — silently dropping the
+                # entire district, including advisories that had already passed.
+                # Nothing unsafe was sent, but no BLOCKED record was written and
+                # nothing appeared in the dashboard's blocked tab. A failure the
+                # operator cannot see is not a safe failure.
+                log.exception("verifier error for %s", advisory.advisory_id)
                 record(
                     "semantic_faithfulness",
                     False,
-                    f"verification unavailable, blocking by default: {exc}"[:300],
+                    f"verification failed ({type(exc).__name__}), blocking by "
+                    f"default: {exc}"[:300],
                 )
 
         status = (
@@ -420,9 +540,18 @@ class Verifier:
 
 
 def summarise(result: VerificationResult) -> str:
-    """One-line rendering for the dashboard and logs."""
+    """One-line rendering for the dashboard and logs.
+
+    Counts only checks that actually ran. A skipped semantic check was
+    previously recorded as a pass, so a template advisory reported "6/6" when
+    five checks had run — overstating the guarantee by exactly the check that
+    did not happen.
+    """
     mark = "PASS" if result.passed else "BLOCK"
-    passed = sum(1 for c in result.checks if c.passed)
-    return f"[{mark}] {passed}/{len(result.checks)} checks" + (
+    ran = [c for c in result.checks if not c.detail.startswith(_SKIPPED)]
+    passed = sum(1 for c in ran if c.passed)
+    skipped = len(result.checks) - len(ran)
+    tail = f" ({skipped} skipped)" if skipped else ""
+    return f"[{mark}] {passed}/{len(ran)} checks{tail}" + (
         "" if result.passed else f" — {result.blocked_reasons[0]}"
     )

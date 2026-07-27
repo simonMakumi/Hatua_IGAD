@@ -128,6 +128,17 @@ class TelegramClient:
             {"callback_query_id": callback_query_id, "text": text[:200]},
         )
 
+    async def set_my_commands(
+        self, commands: list[dict[str, str]]
+    ) -> dict[str, Any]:
+        """Populate Telegram's built-in Menu button.
+
+        Worth doing properly: on a phone, discoverability is the whole battle.
+        A user who has to remember or type a command will use one feature and
+        never find the rest.
+        """
+        return await self._call("setMyCommands", {"commands": commands})
+
     async def set_webhook(self, url: str) -> dict[str, Any]:
         return await self._call(
             "setWebhook",

@@ -21,9 +21,15 @@ same event as the same drought in a stable, food-secure district, and should
 not generate the same warning.
 
     CRS = hazard_composite
-          x exposure_multiplier      (who and what is there)
-          x vulnerability_multiplier (can they absorb it)
-          x confidence_factor        (do we actually know)
+          x exposure_multiplier      (who and what is there,     max 1.5)
+          x vulnerability_multiplier (can they absorb it,        max 2.6)
+          / (1.5 * 2.6)              (normalise to the theoretical maximum)
+
+Confidence is deliberately NOT a term here. It gates whether a trigger fires
+and how severe an advisory may be, but it does not lower the risk score: a
+hazard is no less dangerous for our being unsure about it. Folding uncertainty
+into the ranking would quietly deprioritise a real threat we happen to have
+thin evidence for.
 
 Every term is bounded, every weight is named, and every output carries the
 SignalReadings that produced it.

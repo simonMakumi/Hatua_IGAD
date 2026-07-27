@@ -34,7 +34,7 @@ fall back to a bounded pre-recorded phrase bank — for early warning, hazard ×
 severity × district is a finite set, so recording it with native speakers is
 feasible and produces better audio than synthesis would anyway.
 
-Audio is pre-rendered on the schedule, never on the call path, for the same
+Audio is pre-rendered by the refresh job, never on the call path, for the same
 reason USSD is: a caller will not wait.
 """
 
@@ -215,7 +215,7 @@ async def render(advisory: Advisory, *, force: bool = False) -> Path | None:
 
 
 async def render_all(advisories: list[Advisory]) -> dict[str, str]:
-    """Pre-render every dispatchable advisory. Called by the scheduler.
+    """Pre-render every dispatchable advisory. Called by the refresh job.
 
     Never on the call path — a caller will not wait for synthesis, and the
     telephony provider will time out first anyway.

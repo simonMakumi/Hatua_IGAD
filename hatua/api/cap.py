@@ -92,8 +92,6 @@ def _certainty(confidence: float) -> str:
     fuses — it does not observe. Claiming observation for a modelled signal
     would be a misrepresentation to any downstream system that trusts CAP.
     """
-    if confidence >= 0.85:
-        return "Likely"
     if confidence >= 0.65:
         return "Likely"
     if confidence >= 0.40:
@@ -103,14 +101,16 @@ def _certainty(confidence: float) -> str:
 
 def cap_alert(advisory: Advisory, *, base_url: str = "") -> str:
     """Render one advisory as a CAP 1.2 alert document."""
-    now = datetime.now(timezone.utc)
     oid = WMO_ALERTING_OIDS.get(advisory.country_iso3, "")
     identifier = f"HATUA.{advisory.country_iso3}.{advisory.advisory_id}"
 
     parameters = [
         ("HATUA-confidence", f"{advisory.confidence_score:.2f}"),
         ("HATUA-actions", ",".join(advisory.action_ids)),
-        ("HATUA-verification", "passed"),
+        (
+            "HATUA-verification",
+            advisory.verification.status.value if advisory.verification else "none",
+        ),
         ("HATUA-encoding", advisory.encoding or "n/a"),
     ]
     if oid:

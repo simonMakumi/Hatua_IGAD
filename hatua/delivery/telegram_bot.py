@@ -54,6 +54,19 @@ LANGUAGE_BUTTONS: list[tuple[str, Language]] = [
     ("العربية", Language.ARABIC),
 ]
 
+# Registered with Telegram via setMyCommands, which turns the blue "Menu"
+# button in the chat into a full command list. Users should not have to
+# remember or type commands — on a phone, discoverability is the whole battle.
+BOT_COMMANDS: list[dict[str, str]] = [
+    {"command": "menu", "description": "Everything HATUA can do"},
+    {"command": "alert", "description": "Current advisory for my area"},
+    {"command": "area", "description": "Change my area"},
+    {"command": "language", "description": "Change language"},
+    {"command": "sources", "description": "What this warning is based on"},
+    {"command": "about", "description": "How HATUA works"},
+    {"command": "stop", "description": "Unsubscribe"},
+]
+
 WELCOME = (
     "<b>HATUA — Early Warning</b>\n"
     "<i>From warning to action</i>\n\n"
@@ -61,11 +74,24 @@ WELCOME = (
     "flooding, heavy rain and food security.\n\n"
     "Every advisory is checked against its source data before it is sent. "
     "If we cannot verify it, we do not send it.\n\n"
-    "Commands:\n"
-    "/alert — current advisory for your area\n"
-    "/area — change your area\n"
-    "/language — change language\n"
-    "/stop — unsubscribe"
+    "Tap <b>Menu</b> below, or send /menu, to see everything."
+)
+
+ABOUT = (
+    "<b>How HATUA works</b>\n\n"
+    "<b>1. It watches.</b> Live data from ICPAC, six national meteorological "
+    "agencies, GloFAS river forecasts, GDACS and humanitarian datasets.\n\n"
+    "<b>2. It combines.</b> A drought matters more where people are already "
+    "hungry, displaced or in conflict. HATUA scores all of that together, not "
+    "one hazard at a time.\n\n"
+    "<b>3. It checks before sending.</b> Every advisory passes six checks. "
+    "Every number must trace back to a real source. Every recommended action "
+    "comes from published guidance, never invented. If a warning cannot be "
+    "verified, it is not sent.\n\n"
+    "<b>4. It listens.</b> Your reports tell us whether the warning matched "
+    "what actually happened.\n\n"
+    "<i>HATUA is an early warning service, not an emergency service. In "
+    "immediate danger, contact local authorities directly.</i>"
 )
 
 HELP = (
@@ -206,6 +232,28 @@ def language_keyboard(
     return {"inline_keyboard": rows}
 
 
+def menu_keyboard() -> dict[str, Any]:
+    """One screen with every action, so nothing has to be typed or remembered."""
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "Current advisory", "callback_data": "menu:alert"},
+                {"text": "Sources", "callback_data": "menu:sources"},
+            ],
+            [
+                {"text": "Change area", "callback_data": "menu:area"},
+                {"text": "Change language", "callback_data": "menu:language"},
+            ],
+            [
+                {"text": "Report what I am seeing", "callback_data": "menu:report"},
+            ],
+            [
+                {"text": "How HATUA works", "callback_data": "menu:about"},
+            ],
+        ]
+    }
+
+
 def feedback_keyboard(pcode: str, advisory_id: str = "") -> dict[str, Any]:
     """Attached to every advisory. This is the return path that turns a
     broadcast into a measurement."""
@@ -281,6 +329,12 @@ class BotHandler:
 
         if text.startswith("/start"):
             return self._start(chat_id, text)
+        if text.startswith(("/menu", "/help")):
+            return self._menu(chat_id)
+        if text.startswith("/about"):
+            return BotReply(chat_id, ABOUT, menu_keyboard())
+        if text.startswith("/sources"):
+            return self._sources(chat_id)
         if text.startswith("/alert"):
             return self._alert(chat_id)
         if text.startswith("/area"):
@@ -305,21 +359,33 @@ class BotHandler:
                 "You have been unsubscribed. Send /start at any time to "
                 "receive advisories again.",
             )
-        if text.startswith("/help"):
-            return BotReply(chat_id, HELP)
+        # An unrecognised slash command is a typo or a command from a newer
+        # build — never a field observation. Recording it as one corrupts the
+        # feedback data, which is the only measurement we have of whether a
+        # warning matched reality. Observed live: /menu on an older build was
+        # logged as a ground report.
+        if text.startswith("/"):
+            return BotReply(
+                chat_id,
+                f"<i>Unknown command.</i>\n\n{HELP}",
+                menu_keyboard(),
+            )
 
-        # Free text is treated as a ground-truth report. People will describe
-        # what they are seeing rather than press a button, and throwing that
-        # away would waste the most valuable signal we get.
+        # Genuine free text is treated as a ground-truth report. People
+        # describe what they are seeing rather than pressing a button, and
+        # discarding that would waste the most valuable signal we get.
         sub = self.store.get(chat_id)
         if sub and sub.pcode and text:
-            self.record_feedback(sub.pcode, str(chat_id), FeedbackKind.ACTION_TAKEN)
+            self.record_feedback(
+                sub.pcode, str(chat_id), FeedbackKind.ACTION_TAKEN
+            )
             return BotReply(
                 chat_id,
                 "Thank you — your report has been recorded and will help us "
                 "check this warning against what is actually happening.",
+                menu_keyboard(),
             )
-        return BotReply(chat_id, HELP)
+        return BotReply(chat_id, HELP, menu_keyboard())
 
     def _start(self, chat_id: int, text: str) -> BotReply:
         # Deep-link payload: t.me/Hatua_bot?start=KE039
@@ -343,6 +409,121 @@ class BotHandler:
             f"{WELCOME}\n\nFirst, choose your area:",
             district_keyboard(self.districts()),
         )
+
+    def _menu(self, chat_id: int) -> BotReply:
+        """One screen showing state and every action.
+
+        Leads with what HATUA currently thinks about *your* area, because a
+        menu that opens with a list of commands answers a question nobody
+        asked. The first line should be the reason you opened it.
+        """
+        sub = self.store.get(chat_id)
+        lines = ["<b>HATUA — Early Warning</b>", "<i>From warning to action</i>", ""]
+
+        if sub and sub.pcode:
+            name = next(
+                (n for p, n in self.districts() if p == sub.pcode), sub.pcode
+            )
+            advisory = self.lookup(sub.pcode, sub.language)
+            available = self._available(chat_id)
+
+            lines.append(f"<b>Your area:</b> {name}")
+            lines.append(
+                f"<b>Your language:</b> {sub.language.value.upper()}"
+                + (
+                    ""
+                    if not available or sub.language in available
+                    else "  <i>(not issued here — you receive English)</i>"
+                )
+            )
+            if available:
+                lines.append(
+                    "<b>Issued here:</b> "
+                    + ", ".join(l.value.upper() for l in available)
+                )
+            lines.append("")
+
+            if advisory and advisory.dispatchable:
+                checks = (
+                    len(advisory.verification.checks)
+                    if advisory.verification
+                    else 0
+                )
+                passed = (
+                    sum(1 for c in advisory.verification.checks if c.passed)
+                    if advisory.verification
+                    else 0
+                )
+                lines += [
+                    f"<b>Active advisory:</b> {advisory.severity.value.upper()} "
+                    f"— {advisory.hazard.value.replace('_', ' ')}",
+                    f"Confidence {advisory.confidence_score:.0%} · "
+                    f"{passed}/{checks} verification checks passed",
+                ]
+            else:
+                lines.append(
+                    "<b>No active advisory for your area.</b>\n"
+                    "<i>That is a real answer, not a gap — we do not send a "
+                    "warning unless the data supports one.</i>"
+                )
+        else:
+            lines.append(
+                "You have not chosen an area yet. Tap <b>Change area</b> below."
+            )
+
+        lines += ["", "<i>Choose an option:</i>"]
+        return BotReply(chat_id, "\n".join(lines), menu_keyboard())
+
+    def _sources(self, chat_id: int) -> BotReply:
+        """Show what the current advisory rests on.
+
+        A warning that cannot show its working is a warning you have to take on
+        faith, and faith is exactly what an early warning system runs out of
+        after one bad call.
+        """
+        sub = self.store.get(chat_id)
+        if not sub or not sub.pcode:
+            return BotReply(
+                chat_id,
+                "Choose your area first:",
+                district_keyboard(self.districts()),
+            )
+        advisory = self.lookup(sub.pcode, sub.language)
+        if not advisory or not advisory.dispatchable:
+            return BotReply(
+                chat_id,
+                "There is no active advisory for your area, so there are no "
+                "sources to show.",
+                menu_keyboard(),
+            )
+
+        lines = [
+            f"<b>What this advisory is based on</b>",
+            f"<i>{advisory.admin_name}, {advisory.country_iso3}</i>",
+            "",
+        ]
+        for citation in advisory.cited_signals[:8]:
+            lines.append(f"• <code>{citation}</code>")
+        lines += [
+            "",
+            f"<b>Confidence:</b> {advisory.confidence_score:.0%}",
+        ]
+        if advisory.verification:
+            lines.append("<b>Checks performed:</b>")
+            for check in advisory.verification.checks:
+                mark = "PASS" if check.passed else "FAIL"
+                lines.append(
+                    f"  {mark} — {check.name.replace('_', ' ')}"
+                )
+        if advisory.action_ids:
+            lines += [
+                "",
+                "<b>Recommended actions are drawn from published IGAD, FAO "
+                "and WFP anticipatory action guidance</b>, not generated:",
+            ]
+            for action_id in advisory.action_ids:
+                lines.append(f"  • <code>{action_id}</code>")
+        return BotReply(chat_id, "\n".join(lines), menu_keyboard())
 
     def _alert(self, chat_id: int) -> BotReply:
         sub = self.store.get(chat_id)
@@ -381,6 +562,45 @@ class BotHandler:
         query_id = query.get("id")
         if chat_id is None:
             return None
+
+        if data.startswith("menu:"):
+            action = data.split(":", 1)[1]
+            if action == "alert":
+                reply = self._alert(chat_id)
+            elif action == "sources":
+                reply = self._sources(chat_id)
+            elif action == "about":
+                reply = BotReply(chat_id, ABOUT, menu_keyboard())
+            elif action == "area":
+                reply = BotReply(
+                    chat_id,
+                    "Choose your area:",
+                    district_keyboard(self.districts()),
+                )
+            elif action == "language":
+                available = self._available(chat_id)
+                reply = BotReply(
+                    chat_id,
+                    "Choose your language.\n<i>These are the languages "
+                    "advisories are issued in for your area.</i>"
+                    if available
+                    else "Choose your language:",
+                    language_keyboard(available),
+                )
+            elif action == "report":
+                sub = self.store.get(chat_id)
+                reply = BotReply(
+                    chat_id,
+                    "<b>What are you seeing where you are?</b>\n\n"
+                    "<i>Tap an option, or just type what you are seeing. "
+                    "Your report helps us check whether this warning matched "
+                    "reality.</i>",
+                    feedback_keyboard(sub.pcode if sub and sub.pcode else ""),
+                )
+            else:
+                return None
+            reply.callback_query_id = query_id
+            return reply
 
         if data.startswith("area:"):
             pcode = data.split(":", 1)[1]

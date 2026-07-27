@@ -52,17 +52,18 @@ that refuses to send anything not traceable to source data.
 ```
   OFFICIAL SOURCES              REASONING CORE                 LAST MILE
   ────────────────              ──────────────                 ─────────
-  ICPAC Hazards Watch  ┐                                    ┌─ SMS   (GSM-7/UCS-2 aware)
-  ICPAC Drought Watch  │    ┌────────────────────┐          ├─ USSD  (stateless, 0.05ms)
-  ICPAC Triggers       │    │  Signal Fusion     │          ├─ Voice (pre-rendered TTS)
-  National CAP × 6     ├───►│  (deterministic)   │──┐       ├─ Telegram (bot + channels)
-  Open-Meteo + GloFAS  │    └────────────────────┘  │       ├─ Dashboard (officials)
-  GDACS                │                            │       └─ CAP 1.2 feed (interop)
-  HDX HAPI             │    ┌────────────────────┐  │
-  FEWS NET / IPC       ├───►│  Impact Analyst    │◄─┘                ▲
-  ClimateSERV (CHIRPS) │    │  Action Planner    │                   │
-  WHO / USGS / FIRMS   ┘    │  Localizer         │                   │
-                            │  ══ VERIFIER ══    │───────────────────┘
+  CONSUMED EVERY RUN                                     ┌─ SMS   (GSM-7/UCS-2 aware)
+  Open-Meteo forecast  ┐    ┌────────────────────┐       ├─ USSD  (stateless, 0.05ms)
+  Open-Meteo / GloFAS  │    │  Signal Fusion     │       ├─ Voice (pre-rendered TTS)
+  GDACS multi-hazard   ├───►│  (deterministic,   │──┐    ├─ Telegram (bot + channels)
+  ICPAC dataset currency│   │   no model)        │  │    ├─ Dashboard (officials)
+  National CAP × 7     ┘    └────────────────────┘  │    └─ CAP 1.2 feed (interop)
+                                                    │
+                            ┌────────────────────┐  │               ▲
+                            │  Impact Analyst    │◄─┘               │
+                            │  Action Planner    │                  │
+                            │  Localizer         │                  │
+                            │  ══ VERIFIER ══    │──────────────────┘
                             └────────────────────┘
                                       ▲          nothing passes unverified
                                       │
@@ -83,10 +84,18 @@ You cannot do that with an embedding.
 
 ```
 CRS = hazard_composite
-      × exposure_multiplier      (who and what is there)
-      × vulnerability_multiplier (can they absorb it — IPC, conflict, displacement)
-      × confidence_factor        (do we actually know)
+      × exposure_multiplier       (who and what is there,        max 1.5)
+      × vulnerability_multiplier  (can they absorb it — IPC,
+                                   conflict, displacement,       max 2.6)
+      ÷ (1.5 × 2.6)               (normalise against the theoretical maximum)
 ```
+
+Confidence is deliberately **not** a term in this score. It is computed
+separately and used to gate *whether a trigger fires at all* and *how severe an
+advisory is permitted to be* — because a hazard is no less dangerous for our
+being unsure about it. Folding uncertainty into the risk number would quietly
+downgrade a real threat we happen to have thin evidence for, when the correct
+response is to warn more cautiously, not to rank the district lower.
 
 The reasoning core above it never computes risk. It *explains* risk computed
 here, and the Verifier checks its explanation back against these numbers.
@@ -100,6 +109,15 @@ Live output, ranked:
 | Turkana, KE | 0.371 | 0.67 | drought | drought_emerging, drought_severe |
 | Kampala, UG | 0.364 | 0.55 | flood | flood_watch |
 | Tana River, KE | 0.229 | 0.74 | drought | drought_emerging |
+
+> **On the vulnerability figures.** IPC phase, conflict-event counts and IDP
+> numbers in the demonstration district set (`hatua/api/districts.py`) are
+> **pinned representative values** in the range HDX HAPI returns for these
+> areas, not fetched live. They are pinned so the demo is reproducible and so a
+> reviewer can see exactly what drove each score. The hazard signals — rainfall,
+> river discharge, GDACS alerts, ICPAC currency, national CAP alerts — *are*
+> live on every run. We would rather say this plainly than let a reader assume
+> the conflict counts came off a wire.
 
 Lower Juba's drought signal is only *moderate* (0.65). It ranks second overall
 because IPC Phase 4, 87 conflict events and 64,000 IDPs multiply it. A
@@ -121,11 +139,11 @@ errors, the advisory is blocked — it fails closed.
 
 | Check | What it enforces |
 |---|---|
-| `numeric_fidelity` | Every figure traces to a `SignalReading`. Handles Arabic-Indic and Ethiopic numerals — a `[0-9]` scan would let an Arabic advisory carry unverified figures straight through. |
+| `numeric_fidelity` | Every figure above a small structural threshold traces to a `SignalReading`, within 0.5%. Folds **Arabic-Indic** (٦٤٠٠٠) and **Ethiopic** (፻፳፭ → 125) numerals first — Ethiopic is Unicode category `No`, so `\d` and `unicodedata.decimal` both miss it, and an Amharic advisory could otherwise carry unverified figures straight through. |
 | `action_legitimacy` | Every `action_id` exists in the approved library |
 | `severity_gate` | Severity within the ceiling that confidence permits |
 | `encoding_budget` | Fits its channel and language segment cap |
-| `geographic_sanity` | The named place is the triggered district |
+| `geographic_sanity` | The message body itself names the district it applies to |
 | `semantic_faithfulness` | *(LLM)* No unsupported causal, temporal or instructional claims |
 
 **It earns its place.** On the first live run it caught the model appending
@@ -261,8 +279,13 @@ time-of-day restriction**. Several competitors' free routes only deliver
 
 ## Data sources
 
-Every source below was **verified live against its real endpoint**. Nothing is
-mocked.
+Every source below was **verified live against its real endpoint**. Sources are
+split into those the pipeline actually consumes on each run and those we
+verified as reachable and built connectors toward but do not yet fuse — because
+"we checked this API works" and "this API drives our output" are different
+claims, and only one of them is a feature.
+
+**Consumed by the running pipeline** — these are fetched on every refresh:
 
 | Source | What it provides | Key? |
 |---|---|---|

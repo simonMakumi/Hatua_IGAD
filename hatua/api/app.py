@@ -29,7 +29,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse
 from ..agents.llm import available_providers
 from ..config import get_settings
 from ..delivery import telegram, voice
-from ..delivery.telegram_bot import BotHandler, SubscriberStore
+from ..delivery.telegram_bot import BOT_COMMANDS, BotHandler, SubscriberStore
 from ..delivery.ussd import USSDMenu, USSDRequest
 from ..fusion.engine import explain
 from ..models import (
@@ -689,7 +689,19 @@ async def telegram_set_webhook() -> dict[str, Any]:
     base = get_settings().public_base_url.rstrip("/")
     client = telegram.TelegramClient()
     result = await client.set_webhook(f"{base}/telegram/webhook")
-    return {"webhook": f"{base}/telegram/webhook", "result": result}
+    # Register the command list at the same time, so the blue Menu button in
+    # the chat is populated. Doing it here means one call sets up everything.
+    try:
+        commands = await client.set_my_commands(BOT_COMMANDS)
+    except telegram.TelegramError as exc:
+        log.warning("setMyCommands failed: %s", exc)
+        commands = False
+    return {
+        "webhook": f"{base}/telegram/webhook",
+        "result": result,
+        "commands_registered": bool(commands),
+        "commands": [c["command"] for c in BOT_COMMANDS],
+    }
 
 
 @app.get("/api/subscribers")

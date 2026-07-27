@@ -105,7 +105,7 @@ HAZARD_WORD: dict[Language, dict[HazardType, str]] = {
     Language.OROMO: {
         HazardType.DROUGHT: "Hongee",
         HazardType.FLOOD: "Lolaa",
-        HazardType.HEAVY_RAIN: "Roobа cimaa",
+        HazardType.HEAVY_RAIN: "Rooba cimaa",
         HazardType.HEAT_STRESS: "Ho'a guddaa",
         HazardType.FOOD_INSECURITY: "Hanqina nyaataa",
         HazardType.DISEASE_OUTBREAK: "Weerara dhukkubaa",
