@@ -28,7 +28,8 @@ from fastapi.responses import HTMLResponse, PlainTextResponse
 
 from ..agents.llm import available_providers
 from ..config import get_settings
-from ..delivery import voice
+from ..delivery import telegram, voice
+from ..delivery.telegram_bot import BotHandler, SubscriberStore
 from ..delivery.ussd import USSDMenu, USSDRequest
 from ..fusion.engine import explain
 from ..models import (
@@ -60,6 +61,7 @@ class State:
         self.advisories: dict[tuple[str, str], Advisory] = {}
         self.feedback: list[CommunityFeedback] = []
         self.audio: dict[str, str] = {}
+        self.subscribers = SubscriberStore()
         self.last_run: datetime | None = None
         self.running: bool = False
         self.last_error: str | None = None
@@ -133,6 +135,7 @@ class State:
                 a.model_dump(mode="json") for a in self.all_advisories
             ],
             "feedback": [f.model_dump(mode="json") for f in self.feedback],
+            "subscribers": self.subscribers.to_json(),
         }
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload, default=str), encoding="utf-8")
@@ -163,6 +166,7 @@ class State:
             self.advisories = {
                 (a.pcode, a.language.value): a for a in advisories if a.dispatchable
             }
+            self.subscribers.load_json(payload.get("subscribers", []))
             self.last_run = (
                 datetime.fromisoformat(payload["last_run"])
                 if payload.get("last_run")
@@ -263,6 +267,7 @@ async def health() -> dict[str, Any]:
         "ussd_cache_entries": len(STATE.advisories),
         "feedback_received": len(STATE.feedback),
         "audio_rendered": len(STATE.audio),
+        "telegram_subscribers": STATE.subscribers.active_count,
         "llm_providers_configured": {
             k: v for k, v in available_providers().items() if v
         },
@@ -547,6 +552,112 @@ async def voice_callback(
 
     base = get_settings().public_base_url.rstrip("/")
     return voice.ivr_xml(f"{base}/audio/{STATE.audio[advisory.advisory_id]}")
+
+
+# ---------------------------------------------------------------------------
+# Telegram
+# ---------------------------------------------------------------------------
+
+
+def _bot_handler() -> BotHandler:
+    districts = [
+        (r.assessment.pcode, r.assessment.admin_name)
+        for r in sorted(
+            STATE.results, key=lambda r: -r.assessment.compound_risk_score
+        )
+    ] or [(p, u.name) for p, u in DEMO_UNITS.items()]
+    return BotHandler(
+        store=STATE.subscribers,
+        districts=lambda: districts,
+        advisory_lookup=STATE.lookup,
+        record_feedback=STATE.record_feedback,
+        render_advisory=telegram.render,
+    )
+
+
+async def _dispatch_reply(reply) -> None:
+    """Send a handler reply. Kept separate so the handler stays pure and
+    testable without any network."""
+    client = telegram.TelegramClient()
+    if reply.callback_query_id:
+        try:
+            await client.answer_callback(
+                reply.callback_query_id, reply.answer_callback or ""
+            )
+        except telegram.TelegramError as exc:
+            log.warning("answerCallbackQuery failed: %s", exc)
+    await client.send_message(reply.chat_id, reply.text, keyboard=reply.keyboard)
+
+
+@app.post("/telegram/webhook")
+async def telegram_webhook(request: Request) -> dict[str, str]:
+    """Inbound Telegram updates.
+
+    Telegram retries on a non-2xx, so we always return 200 and log failures.
+    A retry storm during a hazard event is the last thing anyone needs.
+    """
+    try:
+        update = await request.json()
+    except ValueError:
+        return {"status": "ignored"}
+
+    try:
+        reply = _bot_handler().handle(update)
+        if reply:
+            await _dispatch_reply(reply)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("telegram update failed: %s", exc)
+    return {"status": "ok"}
+
+
+@app.post("/telegram/poll")
+async def telegram_poll(limit: int = 20) -> dict[str, Any]:
+    """Drain pending updates by long polling.
+
+    Useful locally, where there is no public URL for a webhook, and as a manual
+    catch-up if the webhook was ever unset.
+    """
+    client = telegram.TelegramClient()
+    updates = await client.get_updates()
+    handled = 0
+    handler = _bot_handler()
+    for update in updates[:limit]:
+        reply = handler.handle(update)
+        if reply:
+            await _dispatch_reply(reply)
+            handled += 1
+    if updates:
+        # Acknowledge so Telegram stops resending them.
+        await client.get_updates(offset=updates[-1]["update_id"] + 1)
+    return {
+        "received": len(updates),
+        "handled": handled,
+        "subscribers": STATE.subscribers.active_count,
+    }
+
+
+@app.post("/telegram/set-webhook")
+async def telegram_set_webhook() -> dict[str, Any]:
+    """Point Telegram at this deployment. Run once after deploying."""
+    base = get_settings().public_base_url.rstrip("/")
+    client = telegram.TelegramClient()
+    result = await client.set_webhook(f"{base}/telegram/webhook")
+    return {"webhook": f"{base}/telegram/webhook", "result": result}
+
+
+@app.get("/api/subscribers")
+async def subscribers() -> dict[str, Any]:
+    """Subscriber counts by district. Never returns chat IDs — a subscriber
+    list for an early warning service is a list of people in a hazard zone."""
+    by_district: dict[str, int] = {}
+    for result in STATE.results:
+        count = len(STATE.subscribers.for_district(result.assessment.pcode))
+        if count:
+            by_district[result.assessment.admin_name] = count
+    return {
+        "active": STATE.subscribers.active_count,
+        "by_district": by_district,
+    }
 
 
 @app.get("/", response_class=HTMLResponse)

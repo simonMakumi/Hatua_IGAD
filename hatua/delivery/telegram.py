@@ -100,7 +100,12 @@ class TelegramClient:
         return await self._call("getMe", {})
 
     async def send_message(
-        self, chat_id: str | int, text: str, *, html: bool = True
+        self,
+        chat_id: str | int,
+        text: str,
+        *,
+        html: bool = True,
+        keyboard: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "chat_id": chat_id,
@@ -109,7 +114,28 @@ class TelegramClient:
         }
         if html:
             payload["parse_mode"] = "HTML"
+        if keyboard:
+            payload["reply_markup"] = keyboard
         return await self._call("sendMessage", payload)
+
+    async def answer_callback(
+        self, callback_query_id: str, text: str = ""
+    ) -> dict[str, Any]:
+        """Acknowledge a button press. Without this Telegram shows a spinner
+        on the user's button until it times out."""
+        return await self._call(
+            "answerCallbackQuery",
+            {"callback_query_id": callback_query_id, "text": text[:200]},
+        )
+
+    async def set_webhook(self, url: str) -> dict[str, Any]:
+        return await self._call(
+            "setWebhook",
+            {"url": url, "allowed_updates": ["message", "callback_query"]},
+        )
+
+    async def delete_webhook(self) -> dict[str, Any]:
+        return await self._call("deleteWebhook", {})
 
     async def get_updates(self, offset: int | None = None) -> list[dict[str, Any]]:
         """Long polling. Avoids needing a public webhook URL during
