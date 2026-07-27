@@ -650,7 +650,22 @@ async def telegram_poll(limit: int = 20) -> dict[str, Any]:
     catch-up if the webhook was ever unset.
     """
     client = telegram.TelegramClient()
-    updates = await client.get_updates()
+    try:
+        updates = await client.get_updates()
+    except telegram.TelegramError as exc:
+        # Telegram refuses getUpdates while a webhook is registered. That is
+        # correct behaviour on their side and means polling is unnecessary —
+        # say so rather than returning a 500 that looks like a real fault.
+        if "webhook" in str(exc).lower() or "conflict" in str(exc).lower():
+            return {
+                "status": "webhook_active",
+                "detail": "A webhook is registered, so updates are delivered "
+                          "to /telegram/webhook and polling is not needed. "
+                          "This endpoint is only for local development.",
+                "subscribers": STATE.subscribers.active_count,
+            }
+        raise HTTPException(502, f"telegram: {exc}")
+
     handled = 0
     handler = _bot_handler()
     for update in updates[:limit]:
