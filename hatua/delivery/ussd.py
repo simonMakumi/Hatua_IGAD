@@ -185,41 +185,63 @@ class USSDMenu:
         districts: list[tuple[str, str]],
         advisory_lookup: Callable[[str, Language], Advisory | None],
         feedback_sink: Callable[[str, str, FeedbackKind], None] | None = None,
+        languages_for: Callable[[str], list[Language]] | None = None,
     ) -> None:
         # (pcode, display name), capped at 8 so the menu fits one screen
         self.districts = districts[:8]
         self.lookup = advisory_lookup
         self.feedback_sink = feedback_sink
+        self.languages_for = languages_for or (lambda _p: [])
+
+    def _languages(self, pcode: str) -> list[tuple[Language, str]]:
+        """Languages actually issued for this district, in menu order.
+
+        Offering a language we do not issue produces a dead end: the caller
+        picks Af-Soomaali for Somali Region, which is issued in Amharic and
+        Afaan Oromo, and gets "no alert for your area" — which is false, and
+        is the worst possible answer because it reads as "you are safe".
+
+        Falls back to the full Latin-script list only when we have no
+        information, so a cold cache still shows a usable menu.
+        """
+        available = set(self.languages_for(pcode))
+        if not available:
+            return USSD_LANGUAGES
+        filtered = [
+            (lang, label) for lang, label in USSD_LANGUAGES if lang in available
+        ]
+        return filtered or USSD_LANGUAGES
 
     def handle(self, request: USSDRequest) -> str:
         steps = request.steps
 
-        # --- Level 0: language ---
+        # --- Level 0: district ---
+        # District first, so the language menu can be filtered to what is
+        # actually issued there. Asking for language first meant offering
+        # options that lead nowhere.
         if not steps:
-            lines = [MENU_LABELS[Language.ENGLISH]["title"]]
+            lines = [MENU_LABELS[Language.ENGLISH]["title"], "Chagua eneo / Area:"]
             lines += [
-                f"{i}. {label}" for i, (_, label) in enumerate(USSD_LANGUAGES, 1)
-            ]
-            return f"{CON} " + "\n".join(lines)
-
-        language = self._language(steps[0])
-        if language is None:
-            return f"{END} {MENU_LABELS[Language.ENGLISH]['invalid']}"
-        labels = MENU_LABELS[language]
-
-        # --- Level 1: district ---
-        if len(steps) == 1:
-            lines = [labels["pick_area"]]
-            lines += [
-                f"{i}. {name}"
-                for i, (_, name) in enumerate(self.districts, 1)
+                f"{i}. {name}" for i, (_, name) in enumerate(self.districts, 1)
             ]
             return f"{CON} " + _fit("\n".join(lines), USSD_SCREEN_CHARS)
 
-        district = self._district(steps[1])
+        district = self._district(steps[0])
         if district is None:
-            return f"{END} {labels['invalid']}"
+            return f"{END} {MENU_LABELS[Language.ENGLISH]['invalid']}"
         pcode, name = district
+
+        # --- Level 1: language, filtered to what exists here ---
+        options = self._languages(pcode)
+        if len(steps) == 1:
+            lines = [f"{name}", "Lugha / Language:"]
+            lines += [f"{i}. {label}" for i, (_, label) in enumerate(options, 1)]
+            return f"{CON} " + _fit("\n".join(lines), USSD_SCREEN_CHARS)
+
+        language = self._language(steps[1], options)
+        if language is None:
+            return f"{END} {MENU_LABELS[Language.ENGLISH]['invalid']}"
+        labels = MENU_LABELS[language]
 
         # --- Level 2: action ---
         if len(steps) == 2:
@@ -264,9 +286,14 @@ class USSDMenu:
 
         return f"{END} {labels['invalid']}"
 
-    def _language(self, token: str) -> Language | None:
+    def _language(
+        self, token: str, options: list[tuple[Language, str]] | None = None
+    ) -> Language | None:
         try:
-            return USSD_LANGUAGES[int(token) - 1][0]
+            index = int(token) - 1
+            if index < 0:
+                return None
+            return (options or USSD_LANGUAGES)[index][0]
         except (ValueError, IndexError):
             return None
 

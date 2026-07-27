@@ -504,6 +504,14 @@ def _menu() -> USSDMenu:
         districts,
         lambda p, l: STATE.lookup(p, l, Channel.USSD),
         STATE.record_feedback,
+        languages_for=lambda pcode: sorted(
+            {
+                Language(lang)
+                for (p, lang, _ch) in STATE.advisories
+                if p == pcode
+            },
+            key=lambda l: l.value,
+        ),
     )
 
 
