@@ -473,7 +473,7 @@ async def feedback() -> dict[str, Any]:
 
 
 @app.get("/api/cap.xml")
-async def cap(response: Response) -> Response:
+async def cap(response: Response, download: bool = False) -> Response:
     """CAP 1.2 feed of every verified advisory.
 
     Emitting CAP costs almost nothing and buys interoperability with HUSIKA
@@ -485,7 +485,19 @@ async def cap(response: Response) -> Response:
         [a for a in STATE.all_advisories if a.dispatchable],
         base_url=get_settings().public_base_url,
     )
-    return Response(content=xml, media_type="application/cap+xml")
+    # Served as application/xml, not application/cap+xml.
+    #
+    # application/cap+xml is the correct MIME type per the CAP spec, but no
+    # browser renders it — it triggers a download, so clicking the link in a
+    # demo or a submission produces a file in your Downloads folder instead of
+    # a readable page. A judge should be able to click and read.
+    #
+    # ?download=1 serves the spec-correct type for anything that actually
+    # consumes the feed programmatically.
+    media = (
+        "application/cap+xml" if download else "application/xml; charset=utf-8"
+    )
+    return Response(content=xml, media_type=media)
 
 
 # ---------------------------------------------------------------------------
@@ -567,6 +579,27 @@ async def voice_coverage() -> dict[str, Any]:
         "voices": voice.coverage(),
         "rendered": len(STATE.audio),
         "azure_configured": bool(get_settings().azure_speech_key),
+    }
+
+
+@app.get("/audio")
+async def audio_index() -> dict[str, Any]:
+    """List the advisory audio this deployment can serve.
+
+    Exists because guessing a content-hashed filename is impossible, and
+    "audio not found" gives no hint about what *is* there.
+    """
+    base = get_settings().public_base_url.rstrip("/")
+    files = sorted(voice.AUDIO_DIR.glob("*.wav")) if voice.AUDIO_DIR.exists() else []
+    by_language: dict[str, list[str]] = {}
+    for f in files:
+        by_language.setdefault(f.name.split("_", 1)[0], []).append(
+            f"{base}/audio/{f.name}"
+        )
+    return {
+        "count": len(files),
+        "languages": sorted(by_language),
+        "by_language": by_language,
     }
 
 
