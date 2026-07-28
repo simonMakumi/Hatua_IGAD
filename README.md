@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="https://hatua.onrender.com"><strong>Live dashboard</strong></a> ·
-  <a href="https://youtu.be/REPLACE_WITH_VIDEO_ID"><strong>Demo video (4 min)</strong></a> ·
+  <a href="https://youtu.be/EBQ8QTpsFk0"><strong>Demo video (4 min)</strong></a> ·
   <a href="https://t.me/Hatua_bot"><strong>Telegram bot</strong></a>
 </p>
 
