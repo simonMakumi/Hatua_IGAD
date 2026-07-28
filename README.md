@@ -1,11 +1,69 @@
-# HATUA
+<p align="center">
+  <img src="docs/img/banner.png" alt="HATUA — from warning to action" width="720">
+</p>
 
-**From warning to action — the last mile of early warning for the Greater Horn of Africa.**
+<p align="center">
+  <strong>From warning to action — the last mile of early warning for the Greater Horn of Africa.</strong>
+</p>
+
+<p align="center">
+  <a href="https://hatua.onrender.com"><strong>Live dashboard</strong></a> ·
+  <a href="https://youtu.be/REPLACE_WITH_VIDEO_ID"><strong>Demo video (4 min)</strong></a> ·
+  <a href="https://t.me/Hatua_bot"><strong>Telegram bot</strong></a>
+</p>
+
+---
 
 *Hatua* is Swahili for **action**, or **step**. ICPAC's dissemination platform is
 called HUSIKA — "be concerned". HATUA is the step after.
 
 Built for the **IGAD Hackathon 2026: Smarter Early Warning, Stronger Communities**.
+
+> The live dashboard is on Render's free tier and sleeps when idle. The first
+> request can take around 50 seconds to wake it.
+
+---
+
+## What it looks like
+
+**The officials' dashboard.** Six districts across four countries, ranked by
+compound risk. Every score is clickable and derives itself in plain arithmetic.
+
+![HATUA dashboard](docs/img/dashboard.png)
+
+**The Verifier blocking an advisory.** 28 of 54 advisories were blocked on this
+run. Five of the six checks are deterministic — a check that depends on a model
+cannot police a model. Here the model used a figure that appears in no source,
+and the advisory was never sent.
+
+![A blocked advisory, with the failing check named](docs/img/verifier.png)
+
+**The Telegram bot.** Note *Issued here: AM, EN* — HATUA only offers languages
+it actually publishes for that district, rather than advertising a language and
+then failing to deliver it.
+
+<p align="center">
+  <img src="docs/img/telegram.png" alt="HATUA Telegram bot menu" width="440">
+</p>
+
+**USSD**, for a feature phone with no credit and no data — 68% of Ethiopian
+women own a phone, 9% use mobile internet. Stateless, sub-3-second, cache reads
+only:
+
+```
+*384*1#
+> CON HATUA Early Warning
+  Chagua eneo / Area:
+  1. Somali Region  2. Gambella  3. Lower Juba
+  4. Kampala  5. Northern Red Sea  6. Turkana
+
+1
+> END Somali Region: Take children under 5 to health facility
+  for nutrition check within 14 days
+```
+
+District first, then only the languages actually issued for it — asking for a
+language HATUA cannot deliver in wastes the one session the user has.
 
 ---
 
